@@ -21,6 +21,7 @@
 
   // ── EXAM TIMER — counts down from the teacher-set duration and auto-submits at 0 ──
   const timerDisplayEl = document.getElementById('exam-timer');
+  let timeWarningShown = false; // "10 minutes left" modal fires once
   function formatTime(totalSeconds) {
     const s = Math.max(0, totalSeconds);
     const mm = Math.floor(s / 60);
@@ -32,7 +33,15 @@
     timerDisplayEl.textContent = formatTime(timerSeconds);
     if (timerSeconds <= 60) timerDisplayEl.classList.add('timer-warning');
   }
+  function maybeShowTimeWarning() {
+    if (timeWarningShown || terminated || autoSubmitted) return;
+    if (timerSeconds <= 600 && timerSeconds > 0) {
+      timeWarningShown = true;
+      showTimeWarningModal();
+    }
+  }
   renderTimer(); // show the correct time immediately, don't wait for the first tick
+  maybeShowTimeWarning(); // covers reloading the page after the 10-min mark has already passed
   const timerIntervalId = setInterval(() => {
     if (terminated) { clearInterval(timerIntervalId); return; }
     if (timerSeconds <= 0) {
@@ -46,7 +55,20 @@
     }
     timerSeconds -= 1;
     renderTimer();
+    maybeShowTimeWarning();
   }, 1000);
+
+  // ── "10 MINUTES LEFT" MODAL — shown once as the exam nears its time limit ──
+  function showTimeWarningModal() {
+    const modal = document.getElementById('time-warning-modal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+  }
+  function hideTimeWarningModal() {
+    const modal = document.getElementById('time-warning-modal');
+    if (modal) modal.style.display = 'none';
+  }
+  document.getElementById('time-warning-dismiss-btn')?.addEventListener('click', hideTimeWarningModal);
 
   // ── ANTI-COPY / ANTI-CHEAT (UI restriction only, no data logged — active immediately) ──
   document.addEventListener('contextmenu', e => e.preventDefault());
@@ -282,24 +304,32 @@
         const counter = document.getElementById('tab-switch-counter');
         if (counter) counter.textContent = tabSwitchCount;
 
-        if (data.terminated) handleTerminated();
+        if (data.terminated) handleTerminated('Your exam has been terminated for exceeding the allowed number of tab switches / focus violations. You cannot retake this exam.');
       } catch (e) {
         console.error('Log error:', e);
       }
     }, 300);
   }
 
-  function handleTerminated() {
+  function handleTerminated(reason) {
+    if (terminated) return; // don't re-trigger if already handled
     terminated = true;
-    const banner = document.getElementById('tab-warning-banner');
-    if (banner) {
-      banner.innerHTML = `🚫 Your exam has been terminated. Redirecting...`;
-      banner.className = 'tab-warning danger';
-      banner.style.display = 'block';
+    hideTimeWarningModal();
+    hideBlur();
+    const fsGate = document.getElementById('fullscreen-gate');
+    if (fsGate) fsGate.style.display = 'none';
+
+    const modal = document.getElementById('terminated-modal');
+    const msgEl = document.getElementById('terminated-modal-message');
+    if (msgEl) {
+      msgEl.textContent = reason ||
+        'Your exam session has been terminated. You cannot retake this exam.';
     }
+    if (modal) modal.style.display = 'flex';
+
     setTimeout(() => {
       window.location.href = CLASS_ID ? `/student/class/${CLASS_ID}` : '/student';
-    }, 2500);
+    }, 4000);
   }
 
   // ── AUTO SAVE ──

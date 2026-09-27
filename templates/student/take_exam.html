@@ -63,9 +63,6 @@
     /* Textarea answers */
     textarea.form-control { font-size: 0.95rem; }
 
-    /* Tab warning banner */
-    #tab-warning-banner { font-size: 0.8rem; padding: 0.6rem 0.8rem; }
-
     /* Section announcement — same compact container as question blocks */
     .section-announcement {
       font-size: 0.95rem;
@@ -120,38 +117,39 @@
   padding:1.25rem;
 ">
   <div style="
-    background:var(--card-bg, #16161c);
-    border:1px solid rgba(255,255,255,0.08);
+    background:var(--card);
+    border:1px solid var(--border);
     border-radius:14px;
     max-width:480px;width:100%;
     padding:1.75rem;
     max-height:88vh;overflow-y:auto;
+    box-shadow:var(--shadow-lg);
   ">
     <div style="font-size:2.25rem;text-align:center;margin-bottom:0.5rem">🔒</div>
-    <div style="color:#fff;font-size:1.2rem;font-weight:700;text-align:center;margin-bottom:0.75rem">
+    <div style="color:var(--text);font-size:1.2rem;font-weight:700;text-align:center;margin-bottom:0.75rem">
       Consent to Exam Monitoring
     </div>
-    <div style="color:rgba(255,255,255,0.7);font-size:0.875rem;line-height:1.6;margin-bottom:1rem">
+    <div style="color:var(--text2);font-size:0.875rem;line-height:1.6;margin-bottom:1rem">
       Before you begin, please note that this exam is proctored. While your exam is in progress,
       SPARK will monitor and log:
     </div>
-    <ul style="color:rgba(255,255,255,0.7);font-size:0.85rem;line-height:1.7;margin:0 0 1rem 1.1rem;padding:0">
+    <ul style="color:var(--text2);font-size:0.85rem;line-height:1.7;margin:0 0 1rem 1.1rem;padding:0">
       <li>Tab switches, lost window focus, or minimizing the browser</li>
       <li>Exiting fullscreen mode (if required for this exam)</li>
       <li>Screenshot or screen-recording attempts</li>
       <li>Connection activity (so your teacher knows if you disconnect)</li>
     </ul>
-    <div style="color:rgba(255,255,255,0.55);font-size:0.8rem;line-height:1.6;margin-bottom:1.25rem">
+    <div style="color:var(--text3);font-size:0.8rem;line-height:1.6;margin-bottom:1.25rem">
       This is used only for academic-integrity purposes and is visible only to your teacher and
       system administrators. Read the full
-      <a href="{{ url_for('privacy_policy') }}" target="_blank" rel="noopener" style="color:#8ab4ff">Data Privacy Statement</a>
+      <a href="{{ url_for('privacy_policy') }}" target="_blank" rel="noopener" style="color:var(--accent)">Data Privacy Statement</a>
       for details on retention and your rights.
     </div>
-    <div style="color:rgba(255,255,255,0.55);font-size:0.78rem;margin-bottom:1.25rem">
+    <div style="color:var(--text3);font-size:0.78rem;margin-bottom:1.25rem">
       Monitoring will not start until you agree below. If you do not agree, you won't be able to
       begin this exam.
     </div>
-    <div id="consent-error" style="display:none;color:#f75f5f;font-size:0.8rem;margin-bottom:0.75rem"></div>
+    <div id="consent-error" style="display:none;color:var(--danger);font-size:0.8rem;margin-bottom:0.75rem"></div>
     <div style="display:flex;gap:0.6rem">
       <button type="button" id="consent-decline-btn" class="btn btn-ghost" style="flex:1">I Do Not Agree</button>
       <button type="button" id="consent-agree-btn" class="btn btn-primary" style="flex:1.4">I Understand & Agree</button>
@@ -212,17 +210,55 @@
   align-items:center;justify-content:center;
   padding:1.5rem;
 ">
-  <div style="background:#1a1a2e;border:1px solid rgba(255,255,255,0.12);border-radius:12px;
-    padding:2rem;max-width:360px;width:100%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;
+    padding:2rem;max-width:360px;width:100%;text-align:center;box-shadow:var(--shadow-lg);">
     <div style="font-size:2.5rem;margin-bottom:0.5rem">📝</div>
-    <div style="color:#fff;font-size:1.15rem;font-weight:700;margin-bottom:0.5rem">Submit your exam?</div>
-    <div style="color:rgba(255,255,255,0.65);font-size:0.9rem;margin-bottom:1.5rem">
+    <div style="color:var(--text);font-size:1.15rem;font-weight:700;margin-bottom:0.5rem">Submit your exam?</div>
+    <div style="color:var(--text2);font-size:0.9rem;margin-bottom:1.5rem">
       This cannot be undone. Make sure you've answered everything you want to.
     </div>
     <div style="display:flex;gap:0.75rem;justify-content:center">
       <button type="button" id="submit-confirm-cancel" class="btn btn-ghost">Cancel</button>
       <button type="button" id="submit-confirm-yes" class="btn btn-success">Yes, Submit</button>
     </div>
+  </div>
+</div>
+
+<!-- Time Warning Modal — shown once when 10 minutes remain -->
+<div id="time-warning-modal" style="
+  display:none;
+  position:fixed;inset:0;z-index:10001;
+  background:rgba(0,0,0,0.7);
+  align-items:center;justify-content:center;
+  padding:1.5rem;
+">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;
+    padding:2rem;max-width:360px;width:100%;text-align:center;box-shadow:var(--shadow-lg);">
+    <div style="font-size:2.5rem;margin-bottom:0.5rem">⏰</div>
+    <div style="color:var(--warning);font-size:1.15rem;font-weight:700;margin-bottom:0.5rem">10 Minutes Left!</div>
+    <div style="color:var(--text2);font-size:0.9rem;margin-bottom:1.5rem">
+      You have 10 minutes remaining on this exam. Please review your answers and submit before time runs out.
+    </div>
+    <button type="button" id="time-warning-dismiss-btn" class="btn btn-primary" style="width:100%">Got it</button>
+  </div>
+</div>
+
+<!-- Terminated Modal — replaces the old banner so the student can't miss it -->
+<div id="terminated-modal" style="
+  display:none;
+  position:fixed;inset:0;z-index:10002;
+  background:rgba(0,0,0,0.85);
+  align-items:center;justify-content:center;
+  padding:1.5rem;
+">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;
+    padding:2rem;max-width:380px;width:100%;text-align:center;box-shadow:var(--shadow-lg);">
+    <div style="font-size:3rem;margin-bottom:0.5rem">🚫</div>
+    <div style="color:var(--danger);font-size:1.2rem;font-weight:700;margin-bottom:0.75rem">Exam Terminated</div>
+    <div id="terminated-modal-message" style="color:var(--text2);font-size:0.9rem;margin-bottom:1.5rem">
+      Your exam has been terminated. You cannot retake this exam.
+    </div>
+    <div style="color:var(--text3);font-size:0.78rem">Redirecting you back…</div>
   </div>
 </div>
 
@@ -236,11 +272,6 @@
 <input type="hidden" id="tab-switch-enabled" value="{{ '1' if exam.tab_switch_enabled else '0' }}" />
 <input type="hidden" id="fullscreen-required" value="{{ '1' if exam.fullscreen_required else '0' }}" />
 <input type="hidden" id="consent-given" value="{{ '1' if exam_session.consent_given else '0' }}" />
-
-<!-- Tab Warning Banner -->
-<div id="tab-warning-banner" style="display:none; padding:0.75rem 1rem; margin-bottom:1rem;
-  background:rgba(247,201,79,0.12); border:1px solid rgba(247,201,79,0.3); border-radius:8px;
-  color:#f7c94f; font-size:0.875rem; font-weight:600;"></div>
 
 <!-- Exam Header -->
 <div class="exam-header">
@@ -460,24 +491,7 @@ function saveCurrentSectionAnswers() {
 })();
 </script>
 
-<!-- Terminated Overlay -->
-<div class="modal-overlay open" id="terminated-overlay" style="display:none !important">
-  <div class="terminated-card">
-    <div class="terminated-icon">🚫</div>
-    <div class="terminated-title">Exam Terminated</div>
-    <p class="text-muted" style="margin-bottom:1.5rem">
-      Your exam has been terminated due to too many violations. You cannot retake this exam.
-    </p>
-    <a href="{{ url_for('student_exams') }}" class="btn btn-ghost">← Back to Exams</a>
-  </div>
-</div>
-
 <style>
-#terminated-overlay.open { display:flex !important; }
-.tab-warning { border-radius:8px; font-size:0.875rem; padding:0.75rem 1rem; margin-bottom:1rem; }
-.tab-warning.danger { background:rgba(247,95,95,0.12); border:1px solid rgba(247,95,95,0.3); color:#f75f5f; }
-.tab-warning.active { background:rgba(247,201,79,0.12); border:1px solid rgba(247,201,79,0.3); color:#f7c94f; }
-
 /* Anti-copy styles */
 .no-select {
   -webkit-user-select: none;
