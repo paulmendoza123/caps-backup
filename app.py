@@ -3942,11 +3942,6 @@ def log_suspicious():
             conn.commit()
             return jsonify({'status': 'logged', 'count': new_count, 'terminated': False})
 
-        if event_type == 'screenshot':
-            # Logged for teacher visibility only — no dedicated counter, no termination.
-            conn.commit()
-            return jsonify({'status': 'logged', 'count': sess['tab_switch_count'], 'terminated': False})
-
         # tab_switch (default/fallback event type) — the only event that can
         # auto-terminate the exam once it hits the teacher-set limit.
         new_count = sess['tab_switch_count'] + 1
