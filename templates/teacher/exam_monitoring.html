@@ -549,12 +549,19 @@ document.querySelectorAll('.terminate-btn').forEach(bindTerminateBtn);
         else if (r.status === 'ongoing') statusBadge = '<span class="badge badge-yellow">● Ongoing</span>';
         else if (r.pct !== null && r.pct >= passPct) statusBadge = '<span class="badge badge-green">Passed</span>';
         else statusBadge = '<span class="badge badge-red">Failed</span>';
+        // "View Results" is only meaningful once the student has an attempt
+        // to review (submitted or terminated) — teachers can always open it,
+        // regardless of the exam's "Show Results to students" setting.
+        const actionCell = (r.status === 'submitted' || r.status === 'terminated')
+          ? `<a href="/teacher/exam/${EXAM_ID}/student/${r.student_id}/result" class="btn btn-ghost btn-sm">👁 View Results</a>`
+          : '<span class="text-muted text-sm">—</span>';
         return `<tr>
           <td class="fw-600">${name}</td>
           <td>${scoreCell}</td>
           <td>${pctCell}</td>
           <td>${statusBadge}</td>
           <td class="text-sm text-muted">${r.submitted_at || '—'}</td>
+          <td>${actionCell}</td>
         </tr>`;
       }).join('');
       container.innerHTML = `
@@ -564,7 +571,7 @@ document.querySelectorAll('.terminate-btn').forEach(bindTerminateBtn);
         <div class="card" style="padding:0">
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Student</th><th>Score</th><th>Percentage</th><th>Status</th><th>Submitted</th></tr></thead>
+              <thead><tr><th>Student</th><th>Score</th><th>Percentage</th><th>Status</th><th>Submitted</th><th>Actions</th></tr></thead>
               <tbody>${rows}</tbody>
             </table>
           </div>

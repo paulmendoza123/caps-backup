@@ -63,6 +63,7 @@
           <th>Percentage</th>
           <th>Status</th>
           <th>Submitted</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -90,6 +91,13 @@
             {% endif %}
           </td>
           <td class="text-sm text-muted">{{ r.submitted_at or '—' }}</td>
+          <td>
+            {% if r.status == 'submitted' or r.status == 'terminated' %}
+            <a href="{{ url_for('teacher_view_student_result', exam_id=exam.id, student_id=r.student_id) }}" class="btn btn-ghost btn-sm">👁 View Results</a>
+            {% else %}
+            <span class="text-muted text-sm">—</span>
+            {% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>

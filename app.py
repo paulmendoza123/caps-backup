@@ -1942,6 +1942,7 @@ def teacher_exam_results(exam_id):
         WHERE es.exam_id=?
         ORDER BY es.score DESC
     ''', (exam_id,)).fetchall()
+    # (student_id already selected above — used to link to the full result review)
 
     # Question analysis — how many students answered each question correctly
     questions_raw = conn.execute('''
@@ -2007,6 +2008,101 @@ def teacher_exam_results(exam_id):
     return render_template('teacher/exam_results.html', exam=exam, results=results,
                            question_stats=question_stats, total_submitted=total_submitted,
                            section_stats=section_stats)
+
+@app.route('/teacher/exam/<int:exam_id>/student/<int:student_id>/result')
+@role_required('teacher')
+def teacher_view_student_result(exam_id, student_id):
+    # Lets a teacher open a specific student's full answer review from the
+    # monitoring/results pages. This ignores the exam's "Show Results to
+    # students" setting on purpose — that setting only controls what
+    # students themselves can see, not what their teacher can see.
+    conn = get_db()
+    exam = conn.execute('''
+        SELECT e.*, c.teacher_id, c.subject_name, c.id as class_id
+        FROM exams e JOIN classes c ON e.class_id = c.id WHERE e.id=?
+    ''', (exam_id,)).fetchone()
+    if not exam or int(exam["teacher_id"]) != int(session["user_id"]):
+        flash('Exam not found.', 'error')
+        return redirect(url_for('teacher_home'))
+
+    student = conn.execute('SELECT * FROM users WHERE id=?', (student_id,)).fetchone()
+    if not student:
+        flash('Student not found.', 'error')
+        return redirect(url_for('teacher_exam_monitoring', exam_id=exam_id) + '#results')
+
+    exam_sess = conn.execute(
+        'SELECT * FROM exam_sessions WHERE exam_id=? AND student_id=?',
+        (exam_id, student_id)
+    ).fetchone()
+    if not exam_sess:
+        flash('This student has not taken this exam yet.', 'error')
+        return redirect(url_for('teacher_exam_monitoring', exam_id=exam_id) + '#results')
+
+    if exam_sess['status'] == 'ongoing':
+        flash('This student is still taking the exam.', 'error')
+        return redirect(url_for('teacher_exam_monitoring', exam_id=exam_id) + '#results')
+
+    qs = conn.execute('''
+        SELECT q.*, s.title as section_title
+        FROM questions q LEFT JOIN sections s ON q.section_id = s.id
+        WHERE q.exam_id = ? ORDER BY s.order_index, q.order_index
+    ''', (exam_id,)).fetchall()
+    # Reorder to match the student's randomized order if the exam was shuffled
+    if exam['randomize_questions'] and exam_sess['question_order']:
+        try:
+            saved_order = json.loads(exam_sess['question_order'])
+            qs_map = {q['id']: q for q in qs}
+            qs = [qs_map[qid] for qid in saved_order if qid in qs_map]
+        except Exception:
+            pass  # Fall back to default order on error
+
+    questions = []
+    for i, q in enumerate(qs, 1):
+        qd = dict(q)
+        qd['original_number'] = i
+        ans = conn.execute('SELECT * FROM answers WHERE session_id=? AND question_id=?',
+                           (exam_sess['id'], q['id'])).fetchone()
+        qd['student_answer'] = ans['answer_text'] if ans else ''
+        if q['question_type'] == 'multiple_choice':
+            choices = conn.execute('SELECT * FROM choices WHERE question_id=?', (q['id'],)).fetchall()
+            qd['choices'] = [dict(c) for c in choices]
+        else:
+            qd['choices'] = []
+        is_case_sensitive = bool(_q_get(q, 'case_sensitive', 0))
+        is_correct = False
+        if q['question_type'] == 'multiple_choice':
+            is_correct = question_credit(q, qd['student_answer']) >= 1.0
+        elif q['question_type'] == 'fill_blank':
+            correct_blanks, total_blanks = fib_grade(qd['student_answer'], q['correct_answer'], is_case_sensitive)
+            is_correct = total_blanks > 0 and correct_blanks == total_blanks
+            qd['fib_correct_blanks'] = correct_blanks
+            qd['fib_total_blanks'] = total_blanks
+            qd['fib_points_earned'] = round(q['points'] * (correct_blanks / total_blanks), 2) if total_blanks else 0
+            # Per-blank breakdown for the review UI
+            blanks = fib_parse_answer(q['correct_answer'])
+            student_parts = (qd['student_answer'] or '').split('|')
+            blank_results = []
+            for bi, alts in enumerate(blanks):
+                given = student_parts[bi].strip() if bi < len(student_parts) else ''
+                if is_case_sensitive:
+                    b_correct = any(given == alt for alt in alts) if given else False
+                else:
+                    b_correct = any(given.lower() == alt.lower() for alt in alts) if given else False
+                blank_results.append({
+                    'index': bi + 1,
+                    'student': given,
+                    'accepted': ' / '.join(alts),
+                    'is_correct': b_correct,
+                })
+            qd['fib_blanks'] = blank_results
+            qd['text_parts'] = fib_split_text(q['question_text'])
+        else:
+            is_correct = question_credit(q, qd['student_answer']) >= 1.0
+        qd['is_correct'] = is_correct
+        questions.append(qd)
+
+    return render_template('teacher/student_exam_result.html', exam=exam, student=student,
+                           exam_session=exam_sess, questions=questions)
 
 @app.route('/teacher/exam/<int:exam_id>/toggle-status', methods=['POST'])
 @role_required('teacher')
@@ -4055,7 +4151,7 @@ def api_monitoring(exam_id):
     # Results data
     passing_score = exam['passing_score'] if exam['passing_score'] is not None else 75
     results_rows = conn.execute('''
-        SELECT u.full_name, es.score, es.total_points, es.status, es.submitted_at
+        SELECT u.id as student_id, u.full_name, es.score, es.total_points, es.status, es.submitted_at
         FROM exam_sessions es JOIN users u ON es.student_id = u.id
         WHERE es.exam_id=?
         ORDER BY
