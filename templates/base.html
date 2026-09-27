@@ -211,11 +211,11 @@ document.addEventListener('DOMContentLoaded', function() {
 {% if session.get('role') == 'student' %}
 <!-- Exam Code Modal — available on every student page -->
 <div id="code-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.6);align-items:center;justify-content:center;">
-  <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:2rem;max-width:360px;width:90%;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,0.4);">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:2rem;max-width:360px;width:90%;text-align:center;box-shadow:var(--shadow-lg);">
     <div style="font-size:2.5rem;margin-bottom:0.5rem">🔑</div>
     <div class="fw-700" style="font-size:1.1rem;margin-bottom:0.25rem">Enter Exam Code</div>
     <div class="text-muted text-sm" style="margin-bottom:1.25rem">Ask your teacher for the 6-character code</div>
-    <div id="code-error" style="display:none;color:#f75f5f;font-size:0.85rem;margin-bottom:0.75rem;background:rgba(247,95,95,0.1);border:1px solid rgba(247,95,95,0.3);border-radius:6px;padding:0.4rem 0.75rem"></div>
+    <div id="code-error" style="display:none;color:var(--danger);font-size:0.85rem;margin-bottom:0.75rem;background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:0.4rem 0.75rem"></div>
     <input id="code-input" type="text" maxlength="6" autocomplete="off" placeholder="A3BX9K"
       style="width:100%;text-align:center;font-size:1.6rem;font-weight:800;letter-spacing:0.3em;font-family:monospace;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:0.6rem;color:inherit;outline:none;margin-bottom:1rem;box-sizing:border-box;"
       oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,'')"
