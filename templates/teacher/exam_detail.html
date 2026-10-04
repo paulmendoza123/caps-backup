@@ -98,6 +98,8 @@
             </div>
             {% endfor %}
           </div>
+          {% elif q.question_type == 'true_false' %}
+          <div class="text-sm text-muted mt-1">Answer: <span class="text-success fw-600">{{ q.correct_answer }}</span></div>
           {% elif q.question_type == 'short_answer' %}
           <div class="text-sm text-muted mt-1">Answer: <span class="text-success fw-600">{{ q.correct_answer }}</span>
             {% if q.case_sensitive %}<span class="badge badge-gray text-xs" style="margin-left:0.4rem" title="Exact case must match">Aa Case-sensitive</span>{% endif %}
@@ -109,6 +111,13 @@
             <span class="badge badge-gray text-xs" style="margin:0 0.15rem">{{ loop.index }}: {{ part.strip() }}</span>
             {% endfor %}
             {% if q.case_sensitive %}<span class="badge badge-gray text-xs" style="margin-left:0.4rem" title="Exact case must match">Aa Case-sensitive</span>{% endif %}
+          </div>
+          {% elif q.question_type == 'essay' %}
+          <div class="text-sm text-muted mt-1">
+            📝 Manually graded · Rubric:
+            {% for crit in q.rubric_criteria %}
+            <span class="badge badge-gray text-xs" style="margin:0 0.15rem">{{ crit.criterion_text }} ({{ crit.max_points }} pt{{ 's' if crit.max_points != 1 else '' }})</span>
+            {% endfor %}
           </div>
           {% endif %}
 
@@ -129,10 +138,12 @@
               <label class="form-label">Question Text</label>
               <textarea name="question_text" class="form-control" rows="3" required>{{ q.question_text }}</textarea>
             </div>
+            {% if q.question_type != 'essay' %}
             <div class="form-group" style="max-width:120px">
               <label class="form-label">Points</label>
               <input type="number" name="points" class="form-control" value="{{ q.points }}" min="1" />
             </div>
+            {% endif %}
             {% if q.question_type == 'multiple_choice' %}
             <div class="form-row mc-choice-grid" data-mc-mode="edit" style="grid-template-columns:1fr 1fr">
               {% for lbl in mc_labels %}
@@ -157,6 +168,18 @@
                 {% endfor %}
               </select>
             </div>
+            {% elif q.question_type == 'true_false' %}
+            <div class="form-group">
+              <label class="form-label">Correct Answer</label>
+              <div class="flex gap-2">
+                <label class="text-sm" style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+                  <input type="radio" name="correct_answer" value="True" {% if q.correct_answer == 'True' %}checked{% endif %} /> True
+                </label>
+                <label class="text-sm" style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+                  <input type="radio" name="correct_answer" value="False" {% if q.correct_answer == 'False' %}checked{% endif %} /> False
+                </label>
+              </div>
+            </div>
             {% elif q.question_type == 'fill_blank' %}
             <div class="form-group">
               <label class="form-label">Blank Answers</label>
@@ -168,6 +191,25 @@
                 <input type="checkbox" name="case_sensitive" value="1" {% if q.case_sensitive %}checked{% endif %} />
                 Case-sensitive (exact case must match, e.g. "Manila" ≠ "manila")
               </label>
+            </div>
+            {% elif q.question_type == 'essay' %}
+            <div class="form-group">
+              <label class="form-label">Rubric Criteria</label>
+              <div class="text-xs text-muted mb-1">Essay questions are graded manually against this rubric. Total points = sum of criteria below.</div>
+              <div class="rubric-rows" data-rubric-rows>
+                {% for crit in q.rubric_criteria %}
+                <div class="form-row rubric-row" style="grid-template-columns:1fr 100px 32px;gap:0.5rem;align-items:end;margin-bottom:0.4rem">
+                  <div class="form-group" style="margin:0">
+                    <input type="text" name="rubric_text[]" class="form-control" value="{{ crit.criterion_text }}" placeholder="e.g. Content & Ideas" />
+                  </div>
+                  <div class="form-group" style="margin:0">
+                    <input type="number" name="rubric_points[]" class="form-control" value="{{ crit.max_points }}" min="1" placeholder="Pts" />
+                  </div>
+                  <button type="button" class="btn btn-ghost btn-sm" onclick="this.closest('.rubric-row').remove()" title="Remove criterion">✕</button>
+                </div>
+                {% endfor %}
+              </div>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="rubricAddRow(this)">+ Add Criterion</button>
             </div>
             {% else %}
             <div class="form-group">
@@ -205,15 +247,17 @@
             <label class="form-label">Question Type</label>
             <select name="question_type" class="form-select qtype-select" onchange="toggleQtypeFields(this)">
               <option value="multiple_choice" selected>Multiple Choice</option>
+              <option value="true_false">True / False</option>
               <option value="short_answer">Short Answer</option>
               <option value="fill_blank">Fill in the Blank</option>
+              <option value="essay">Essay</option>
             </select>
           </div>
           <div class="form-group">
             <label class="form-label">Question Text</label>
             <textarea name="question_text" class="form-control add-question-textarea" rows="2" placeholder="Type question here..." required></textarea>
           </div>
-          <div class="form-group">
+          <div class="form-group qtype-points-field">
             <label class="form-label">Points</label>
             <input type="number" name="points" class="form-control" value="1" min="1" style="max-width:100px" />
           </div>
@@ -238,6 +282,20 @@
                 <option value="{{ lbl }}">{{ lbl }}</option>
                 {% endfor %}
               </select>
+            </div>
+          </div>
+
+          <div class="qtype-fields qtype-fields-tf" style="display:none">
+            <div class="form-group">
+              <label class="form-label">Correct Answer</label>
+              <div class="flex gap-2">
+                <label class="text-sm" style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+                  <input type="radio" name="correct_answer_tf" value="True" /> True
+                </label>
+                <label class="text-sm" style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+                  <input type="radio" name="correct_answer_tf" value="False" /> False
+                </label>
+              </div>
             </div>
           </div>
 
@@ -266,6 +324,25 @@
                 <input type="checkbox" name="case_sensitive" value="1" />
                 Case-sensitive (exact case must match, e.g. "Manila" ≠ "manila")
               </label>
+            </div>
+          </div>
+
+          <div class="qtype-fields qtype-fields-essay" style="display:none">
+            <div class="text-xs text-muted mb-1">Essay questions are always graded manually by you, against the rubric below. Total points = sum of criteria.</div>
+            <div class="form-group">
+              <label class="form-label">Rubric Criteria</label>
+              <div class="rubric-rows" data-rubric-rows>
+                <div class="form-row rubric-row" style="grid-template-columns:1fr 100px 32px;gap:0.5rem;align-items:end;margin-bottom:0.4rem">
+                  <div class="form-group" style="margin:0">
+                    <input type="text" name="rubric_text[]" class="form-control" placeholder="e.g. Content & Ideas" />
+                  </div>
+                  <div class="form-group" style="margin:0">
+                    <input type="number" name="rubric_points[]" class="form-control" min="1" placeholder="Pts" />
+                  </div>
+                  <button type="button" class="btn btn-ghost btn-sm" onclick="this.closest('.rubric-row').remove()" title="Remove criterion">✕</button>
+                </div>
+              </div>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="rubricAddRow(this)">+ Add Criterion</button>
             </div>
           </div>
 
@@ -905,15 +982,40 @@ function toggleQtypeFields(select) {
   const form = select.closest('form');
   if (!form) return;
   const mc = form.querySelector('.qtype-fields-mc');
+  const tf = form.querySelector('.qtype-fields-tf');
   const sa = form.querySelector('.qtype-fields-sa');
   const fib = form.querySelector('.qtype-fields-fib');
+  const essay = form.querySelector('.qtype-fields-essay');
+  const pointsField = form.querySelector('.qtype-points-field');
   if (mc) mc.style.display = select.value === 'multiple_choice' ? 'block' : 'none';
+  if (tf) tf.style.display = select.value === 'true_false' ? 'block' : 'none';
   if (sa) sa.style.display = select.value === 'short_answer' ? 'block' : 'none';
   if (fib) fib.style.display = select.value === 'fill_blank' ? 'block' : 'none';
+  if (essay) essay.style.display = select.value === 'essay' ? 'block' : 'none';
+  // Essay points are computed from the rubric, not typed directly — hide the field.
+  if (pointsField) pointsField.style.display = select.value === 'essay' ? 'none' : 'block';
 }
 document.addEventListener('DOMContentLoaded', function() {
   document.querySelectorAll('.qtype-select').forEach(toggleQtypeFields);
 });
+
+/* Rubric criteria builder — add/remove rows, shared by add-question and edit-question forms */
+function rubricAddRow(btn) {
+  const container = btn.previousElementSibling; // the .rubric-rows div right before the button
+  const row = document.createElement('div');
+  row.className = 'form-row rubric-row';
+  row.style.cssText = 'grid-template-columns:1fr 100px 32px;gap:0.5rem;align-items:end;margin-bottom:0.4rem';
+  row.innerHTML = `
+    <div class="form-group" style="margin:0">
+      <input type="text" name="rubric_text[]" class="form-control" placeholder="e.g. Content & Ideas" />
+    </div>
+    <div class="form-group" style="margin:0">
+      <input type="number" name="rubric_points[]" class="form-control" min="1" placeholder="Pts" />
+    </div>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="this.closest('.rubric-row').remove()" title="Remove criterion">✕</button>
+  `;
+  container.appendChild(row);
+}
 
 /* Live hint: count '___' blanks in the question text vs '|' answer groups typed */
 document.addEventListener('input', function(e) {

@@ -120,9 +120,13 @@
   <div class="result-score {% if pct >= pass_pct %}pass{% else %}fail{% endif %}">
     {{ exam_session.score|score_fmt }} / {{ exam_session.total_points }}
   </div>
+  {% if exam_session.needs_grading %}
+  <div class="badge badge-yellow text-sm" style="margin-bottom:0.5rem">⏳ Score is not final — some essay answers are still being graded by your teacher</div>
+  {% else %}
   <div style="font-size:1.5rem;font-weight:700;margin-bottom:0.5rem">
     {{ pct }}% — {% if pct >= pass_pct %}<span class="text-success">PASSED ✓</span>{% else %}<span class="text-danger">FAILED ✗</span>{% endif %}
   </div>
+  {% endif %}
 </div>
 
 {% if exam_closed and questions %}
@@ -177,6 +181,19 @@
         <div class="text-xs text-muted mt-1">
           {{ q.fib_correct_blanks }}/{{ q.fib_total_blanks }} blank(s) correct · {{ q.fib_points_earned }}/{{ q.points }} pt(s) earned
         </div>
+      </div>
+    {% elif q.question_type == 'essay' %}
+      <div class="text-sm mt-1">
+        <span class="text-muted">Your answer:</span>
+        <div style="white-space:pre-wrap;margin-top:0.25rem">{{ q.student_answer or '(no answer submitted)' }}</div>
+        {% if q.is_graded %}
+        <div class="mt-1"><span class="badge badge-green text-xs">✓ Graded — {{ q.manual_score|score_fmt }}/{{ q.points }} pt(s)</span></div>
+        {% if q.feedback %}
+        <div class="text-xs text-muted mt-1">Teacher feedback: {{ q.feedback }}</div>
+        {% endif %}
+        {% else %}
+        <div class="mt-1"><span class="badge badge-yellow text-xs">⏳ Pending grading</span></div>
+        {% endif %}
       </div>
     {% else %}
       <div class="text-sm mt-1">

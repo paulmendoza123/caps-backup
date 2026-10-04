@@ -315,6 +315,17 @@
         </label>
         {% endfor %}
       </div>
+      {% elif q.question_type == 'true_false' %}
+      <div class="choices-list">
+        {% for val in ['True', 'False'] %}
+        <label class="choice-item {% if saved_map.get(q.id) == val %}selected{% endif %}">
+          <input type="radio" name="answer_{{ q.id }}" value="{{ val }}"
+                 data-qid="{{ q.id }}"
+                 {% if saved_map.get(q.id) == val %}checked{% endif %} />
+          <span>{{ val }}</span>
+        </label>
+        {% endfor %}
+      </div>
       {% elif q.question_type == 'fill_blank' %}
       {% set saved_parts = (saved_map.get(q.id, '') or '').split('|') %}
       {% if '\n' in q.question_text %}
@@ -332,6 +343,12 @@
       {% endif %}
       <textarea name="answer_{{ q.id }}" class="auto-save fib-hidden" data-qid="{{ q.id }}"
                 style="display:none">{{ saved_map.get(q.id, '') }}</textarea>
+      {% elif q.question_type == 'essay' %}
+      <div class="text-xs text-muted mb-1">📝 This question is manually graded by your teacher.</div>
+      <textarea name="answer_{{ q.id }}" class="form-control auto-save"
+                data-qid="{{ q.id }}"
+                placeholder="Write your answer here..."
+                rows="10">{{ saved_map.get(q.id, '') }}</textarea>
       {% else %}
       <textarea name="answer_{{ q.id }}" class="form-control auto-save"
                 data-qid="{{ q.id }}"

@@ -85,13 +85,6 @@
       <a href="{{ url_for('admin_classes') }}" class="nav-item {% if request.endpoint in ['admin_classes','admin_edit_class'] %}active{% endif %}">
         <span class="nav-icon">📚</span> Classes
       </a>
-      <div class="nav-section-label">Enrollment Control</div>
-      <a href="{{ url_for('admin_allowed_students') }}" class="nav-item {% if request.endpoint == 'admin_allowed_students' %}active{% endif %}">
-        <span class="nav-icon">🎓</span> Student Emails
-      </a>
-      <a href="{{ url_for('admin_allowed_teachers') }}" class="nav-item {% if request.endpoint == 'admin_allowed_teachers' %}active{% endif %}">
-        <span class="nav-icon">🧑‍🏫</span> Teacher Emails
-      </a>
       <a href="{{ url_for('admin_exam_overview') }}" class="nav-item {% if request.endpoint == 'admin_exam_overview' %}active{% endif %}">
         <span class="nav-icon">📝</span> Exam Overview
       </a>

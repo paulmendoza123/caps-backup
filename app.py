@@ -6,8 +6,6 @@ import random
 import string
 import json
 import re
-import csv
-import io
 from functools import wraps
 from datetime import datetime
 import threading
@@ -16,16 +14,38 @@ import time
 app = Flask(__name__)
 app.secret_key = 'spark_secret_key_2027'
 
-# ─── Enrollment Control: bulk email import + COR auto-detect helpers ───────
-
-EMAIL_RE = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
-SCHOOL_EMAIL_DOMAIN = 'psu.palawan.edu.ph'
 
 # Multiple-choice questions support up to 26 options, labeled A through Z.
 MC_LABELS = list(string.ascii_uppercase)
 
 # Minimum number of choices a multiple-choice question must have.
 MC_MIN_CHOICES = 2
+
+
+def rubric_collect_criteria(form):
+    """Return [(criterion_text, max_points), ...] for every non-empty
+    rubric_text_<n> field submitted alongside its rubric_points_<n> field."""
+    out = []
+    texts = form.getlist('rubric_text[]')
+    pts = form.getlist('rubric_points[]')
+    for t, p in zip(texts, pts):
+        t = (t or '').strip()
+        if not t:
+            continue
+        try:
+            p = int(p)
+        except (TypeError, ValueError):
+            p = 0
+        if p > 0:
+            out.append((t, p))
+    return out
+
+
+def rubric_validate(criteria):
+    """Essay questions require at least one rubric criterion worth points."""
+    if not criteria:
+        return False, 'Essay questions require at least one rubric criterion with points greater than 0.'
+    return True, None
 
 
 def mc_collect_choices(form):
@@ -60,157 +80,6 @@ def mc_validate(choices, correct):
             f'({", ".join(labels)}).'
         )
     return True, correct, None
-
-def extract_emails_from_file(file_storage):
-    """Reads an uploaded .csv, .xlsx, .docx, or .pdf file and pulls out every
-    valid-looking email address found anywhere in it — works no matter how
-    the registrar/HR office formats their list (email-only column, or a full
-    roster with names/programs mixed in). Returns a lowercased, de-duplicated
-    list of emails, in first-seen order.
-    """
-    filename = (file_storage.filename or '').lower()
-    found = []
-    seen = set()
-
-    def add_candidate(cell):
-        if cell is None:
-            return
-        text = str(cell).strip().lower()
-        if EMAIL_RE.match(text) and text not in seen:
-            seen.add(text)
-            found.append(text)
-
-    if filename.endswith('.csv'):
-        raw = file_storage.read()
-        try:
-            text = raw.decode('utf-8-sig')
-        except UnicodeDecodeError:
-            text = raw.decode('latin-1')
-        reader = csv.reader(io.StringIO(text))
-        for row in reader:
-            for cell in row:
-                add_candidate(cell)
-
-    elif filename.endswith('.xlsx') or filename.endswith('.xlsm'):
-        import openpyxl
-        wb = openpyxl.load_workbook(file_storage, read_only=True, data_only=True)
-        for ws in wb.worksheets:
-            for row in ws.iter_rows(values_only=True):
-                for cell in row:
-                    add_candidate(cell)
-
-    elif filename.endswith('.docx'):
-        import docx
-        document = docx.Document(file_storage)
-        for para in document.paragraphs:
-            for word in para.text.split():
-                add_candidate(word.strip(',;'))
-        for table in document.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    add_candidate(cell.text.strip())
-
-    elif filename.endswith('.pdf'):
-        import pdfplumber
-        with pdfplumber.open(file_storage) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text() or ''
-                for word in text.split():
-                    add_candidate(word.strip(',;'))
-
-    else:
-        raise ValueError('Unsupported file type. Please upload a .csv, .xlsx, .docx, or .pdf file.')
-
-    return found
-
-# Labels recognized on a COR. Used both to find the fields we want, and —
-# when a PDF table layout puts two fields on the same visual line (e.g.
-# "Program: BSIT   Curriculum: 2018-2019") — to know where one field's value
-# ends and the next field's label begins, so it isn't swallowed whole.
-_COR_LABEL_ALTS = [
-    r'student\s*(?:no\.?|number)',
-    r'name',
-    r'program',
-    r'curriculum',
-    r'year\s*level',
-    r'semester',
-    r'block',
-    r'section',
-    r'college',
-]
-_COR_NEXT_LABEL_RE = re.compile(r'\b(?:' + '|'.join(_COR_LABEL_ALTS) + r')\s*\.?\s*:', re.IGNORECASE)
-
-# Each pattern is anchored to the start of the (stripped) line, matched
-# case-insensitively, with an optional period and flexible spacing before
-# the colon so "Student No:", "Student No.:", "STUDENT NUMBER :" all match.
-_COR_FIELD_RE = {
-    'student_no': re.compile(r'^student\s*(?:no\.?|number)\s*\.?\s*:?\s*(.+)$', re.IGNORECASE),
-    'name':       re.compile(r'^name\s*\.?\s*:?\s*(.+)$', re.IGNORECASE),
-    'program':    re.compile(r'^program\s*\.?\s*:?\s*(.+)$', re.IGNORECASE),
-    'year_level': re.compile(r'^year\s*level\s*\.?\s*:?\s*(.+)$', re.IGNORECASE),
-}
-
-
-def _cor_clean_value(raw):
-    """Cut a captured field value off at the point another known COR label
-    starts, if one appears later on the same line (table layouts sometimes
-    put two label/value pairs on one visual row)."""
-    m = _COR_NEXT_LABEL_RE.search(raw)
-    if m:
-        return raw[:m.start()].strip(' :-\t')
-    return raw.strip()
-
-
-def parse_cor_pdf(file_storage):
-    """Reads a Certificate of Registration (COR) PDF — which does NOT print an
-    email address — and extracts the student's info from its layout, then
-    generates the official school email from the student number using the
-    confirmed institutional pattern: digits-only(student no) + '@psu.palawan.edu.ph'.
-    Returns a dict, or None if the expected fields couldn't be found (so the
-    caller can flag it for manual review instead of guessing).
-
-    Each field is matched line-by-line (rather than chaining regexes across
-    the whole page) so an extra field sitting between two that we care about
-    — e.g. a Block/Section line between Name and Program, very common on
-    real COR templates — doesn't break the whole parse. Labels are matched
-    case-insensitively with an optional period/extra spacing (so "Student
-    No:", "Student No.:", "STUDENT NUMBER:" all work), and if a PDF table
-    layout puts two fields on the same visual line (e.g. "Program: BSIT
-    Curriculum: 2018-2019"), the value is cut off where the next known label
-    starts instead of swallowing it.
-    """
-    import pdfplumber
-    with pdfplumber.open(file_storage) as pdf:
-        text = '\n'.join((p.extract_text() or '') for p in pdf.pages)
-
-    fields = {}
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        for key, pattern in _COR_FIELD_RE.items():
-            if key in fields:
-                continue
-            m = pattern.match(stripped)
-            if m:
-                fields[key] = _cor_clean_value(m.group(1))
-
-    student_no_raw = fields.get('student_no')
-    name_raw = fields.get('name')
-    if not student_no_raw or not name_raw:
-        return None
-
-    digits_only = re.sub(r'\D', '', student_no_raw)
-    if not digits_only:
-        return None
-
-    return {
-        'student_no': student_no_raw,
-        'name': name_raw,
-        'program': fields.get('program', ''),
-        'year_level': fields.get('year_level', ''),
-        'generated_email': f'{digits_only}@{SCHOOL_EMAIL_DOMAIN}',
-    }
 
 # ─── Fill in the Blank helpers ──────────────────────────────────────────────
 # Storage format for a fill_blank question's correct_answer column:
@@ -276,20 +145,31 @@ def _q_get(q, key, default=None):
         return default
     return default if v is None else v
 
-def question_credit(q, answer):
+def question_credit(q, answer, manual_score=None):
     """Fraction of credit (0.0 - 1.0) that `answer` earns on question `q`.
     Single source of truth used by submit grading, the student answer review
-    and the per-question analytics, so they can never disagree."""
+    and the per-question analytics, so they can never disagree.
+
+    Essay questions cannot be auto-graded from the raw text — they are always
+    manually scored by the teacher against a rubric. `manual_score` (the
+    points already awarded, if any) is optional and defaults to None, meaning
+    "not graded yet" → 0 credit until a teacher scores it.
+    """
     ans = (answer or '').strip()
     correct = (_q_get(q, 'correct_answer', '') or '').strip()
     qtype = _q_get(q, 'question_type', '')
     case_sensitive = bool(_q_get(q, 'case_sensitive', 0))
+    if qtype == 'essay':
+        if manual_score is None:
+            return 0.0
+        pts = _q_get(q, 'points', 0) or 0
+        return (manual_score / pts) if pts else 0.0
     if qtype == 'fill_blank':
         got, total = fib_grade(ans, correct, case_sensitive)
         return (got / total) if total else 0.0
     if not ans:
         return 0.0  # an unanswered question never earns credit
-    if qtype == 'multiple_choice':
+    if qtype == 'multiple_choice' or qtype == 'true_false':
         return 1.0 if ans.upper() == correct.upper() else 0.0
     if case_sensitive:
         return 1.0 if ans == correct else 0.0
@@ -298,20 +178,40 @@ def question_credit(q, answer):
 def count_fully_correct(conn, exam_id, questions):
     """{question_id: number of SUBMITTED sessions whose answer is fully correct}.
     Uses question_credit so fill-in-the-blank alternates ('/'), multiple blanks
-    ('|') and case-sensitivity are respected (a raw string compare is not)."""
+    ('|') and case-sensitivity are respected (a raw string compare is not).
+    Essay answers pass their manual_score through so a fully-graded, full-marks
+    essay counts as correct too (ungraded essays correctly count as 0 here)."""
     by_id = {q['id']: q for q in questions}
     counts = {qid: 0 for qid in by_id}
     if not by_id:
         return counts
     rows = conn.execute('''
-        SELECT question_id, answer_text FROM answers
+        SELECT question_id, answer_text, manual_score FROM answers
         WHERE session_id IN (SELECT id FROM exam_sessions WHERE exam_id=? AND status='submitted')
     ''', (exam_id,)).fetchall()
     for r in rows:
         q = by_id.get(r['question_id'])
-        if q is not None and question_credit(q, r['answer_text']) >= 1.0:
+        if q is not None and question_credit(q, r['answer_text'], r['manual_score']) >= 1.0:
             counts[q['id']] += 1
     return counts
+
+
+def avg_essay_pct(conn, exam_id, question_id, points):
+    """Average score percentage for one essay question, across every
+    SUBMITTED session that has been graded so far. Ungraded submissions are
+    excluded (not counted as 0%) so the average isn't dragged down just
+    because grading isn't finished yet. Returns None if nothing is graded."""
+    if not points:
+        return None
+    rows = conn.execute('''
+        SELECT manual_score FROM answers
+        WHERE question_id=? AND manual_score IS NOT NULL
+          AND session_id IN (SELECT id FROM exam_sessions WHERE exam_id=? AND status='submitted')
+    ''', (question_id, exam_id)).fetchall()
+    if not rows:
+        return None
+    total_pct = sum((r['manual_score'] / points) * 100 for r in rows)
+    return round(total_pct / len(rows))
 
 def pct_floor(score, total):
     """Whole-number percentage, multiplying BEFORE dividing so exact scores
@@ -426,7 +326,7 @@ def init_db():
             exam_id INTEGER NOT NULL,
             section_id INTEGER,
             question_text TEXT NOT NULL,
-            question_type TEXT NOT NULL CHECK(question_type IN ('multiple_choice','short_answer','fill_blank')),
+            question_type TEXT NOT NULL CHECK(question_type IN ('multiple_choice','short_answer','fill_blank','essay','true_false')),
             points INTEGER DEFAULT 1,
             correct_answer TEXT,
             order_index INTEGER DEFAULT 0,
@@ -824,6 +724,145 @@ def init_db():
         except Exception:
             pass
 
+    # Migration: widen questions.question_type CHECK constraint to allow 'essay'.
+    # Same recreate-table pattern used for the 'fill_blank' widening above.
+    try:
+        tbl_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='questions'"
+        ).fetchone()
+        if tbl_sql and 'essay' not in (tbl_sql['sql'] or ''):
+            conn.execute('PRAGMA foreign_keys=OFF')
+            conn.execute('''
+                CREATE TABLE questions_essay_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    exam_id INTEGER,
+                    section_id INTEGER,
+                    question_text TEXT NOT NULL,
+                    question_type TEXT NOT NULL CHECK(question_type IN ('multiple_choice','short_answer','fill_blank','essay')),
+                    points INTEGER DEFAULT 1,
+                    correct_answer TEXT,
+                    order_index INTEGER DEFAULT 0,
+                    bank_group_id INTEGER REFERENCES question_bank_groups(id),
+                    is_bank_only INTEGER DEFAULT 0,
+                    teacher_id INTEGER REFERENCES users(id),
+                    case_sensitive INTEGER DEFAULT 0,
+                    FOREIGN KEY (exam_id) REFERENCES exams(id),
+                    FOREIGN KEY (section_id) REFERENCES sections(id)
+                )
+            ''')
+            conn.execute('''
+                INSERT INTO questions_essay_new
+                    (id, exam_id, section_id, question_text, question_type, points,
+                     correct_answer, order_index, bank_group_id, is_bank_only, teacher_id, case_sensitive)
+                SELECT id, exam_id, section_id, question_text, question_type, points,
+                       correct_answer, order_index, bank_group_id,
+                       COALESCE(is_bank_only, 0), teacher_id, COALESCE(case_sensitive, 0)
+                FROM questions
+            ''')
+            conn.execute('DROP TABLE questions')
+            conn.execute('ALTER TABLE questions_essay_new RENAME TO questions')
+            conn.execute('PRAGMA foreign_keys=ON')
+            conn.commit()
+    except Exception:
+        try:
+            conn.execute('PRAGMA foreign_keys=ON')
+        except Exception:
+            pass  # Already widened or migration failed gracefully
+
+    # Migration: widen questions.question_type CHECK constraint to allow 'true_false'.
+    # Same recreate-table pattern used above.
+    try:
+        tbl_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='questions'"
+        ).fetchone()
+        if tbl_sql and 'true_false' not in (tbl_sql['sql'] or ''):
+            conn.execute('PRAGMA foreign_keys=OFF')
+            conn.execute('''
+                CREATE TABLE questions_tf_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    exam_id INTEGER,
+                    section_id INTEGER,
+                    question_text TEXT NOT NULL,
+                    question_type TEXT NOT NULL CHECK(question_type IN ('multiple_choice','short_answer','fill_blank','essay','true_false')),
+                    points INTEGER DEFAULT 1,
+                    correct_answer TEXT,
+                    order_index INTEGER DEFAULT 0,
+                    bank_group_id INTEGER REFERENCES question_bank_groups(id),
+                    is_bank_only INTEGER DEFAULT 0,
+                    teacher_id INTEGER REFERENCES users(id),
+                    case_sensitive INTEGER DEFAULT 0,
+                    FOREIGN KEY (exam_id) REFERENCES exams(id),
+                    FOREIGN KEY (section_id) REFERENCES sections(id)
+                )
+            ''')
+            conn.execute('''
+                INSERT INTO questions_tf_new
+                    (id, exam_id, section_id, question_text, question_type, points,
+                     correct_answer, order_index, bank_group_id, is_bank_only, teacher_id, case_sensitive)
+                SELECT id, exam_id, section_id, question_text, question_type, points,
+                       correct_answer, order_index, bank_group_id,
+                       COALESCE(is_bank_only, 0), teacher_id, COALESCE(case_sensitive, 0)
+                FROM questions
+            ''')
+            conn.execute('DROP TABLE questions')
+            conn.execute('ALTER TABLE questions_tf_new RENAME TO questions')
+            conn.execute('PRAGMA foreign_keys=ON')
+            conn.commit()
+    except Exception:
+        try:
+            conn.execute('PRAGMA foreign_keys=ON')
+        except Exception:
+            pass  # Already widened or migration failed gracefully
+
+    # Migration: Essay questions + Rubrics + Manual Grading
+    # ─────────────────────────────────────────────────────
+    # Rubric criteria live on the question itself (defined once by the teacher).
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS rubric_criteria (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question_id INTEGER NOT NULL,
+            criterion_text TEXT NOT NULL,
+            max_points INTEGER NOT NULL DEFAULT 1,
+            order_index INTEGER DEFAULT 0,
+            FOREIGN KEY (question_id) REFERENCES questions(id)
+        )
+    ''')
+    # Per-criterion score awarded to one specific student answer.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS rubric_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            answer_id INTEGER NOT NULL,
+            criterion_id INTEGER NOT NULL,
+            score REAL NOT NULL DEFAULT 0,
+            FOREIGN KEY (answer_id) REFERENCES answers(id),
+            FOREIGN KEY (criterion_id) REFERENCES rubric_criteria(id),
+            UNIQUE(answer_id, criterion_id)
+        )
+    ''')
+    conn.commit()
+
+    # answers: fields needed to record a manually-graded essay score/feedback
+    for col_sql in (
+        'ALTER TABLE answers ADD COLUMN manual_score REAL',
+        'ALTER TABLE answers ADD COLUMN feedback TEXT',
+        'ALTER TABLE answers ADD COLUMN graded_by INTEGER',
+        'ALTER TABLE answers ADD COLUMN graded_at TIMESTAMP',
+    ):
+        try:
+            conn.execute(col_sql)
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
+
+    # exam_sessions: tracks whether this submission still has ungraded essay
+    # answers, so the student sees "pending" instead of a final score, and the
+    # teacher's results list can flag which submissions need attention.
+    try:
+        conn.execute('ALTER TABLE exam_sessions ADD COLUMN needs_grading INTEGER DEFAULT 0')
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
+
 
 def get_maintenance_db():
     """Standalone sqlite connection for the background maintenance thread, which
@@ -988,14 +1027,6 @@ def signup():
         if password != confirm_password:
             flash('Passwords do not match.', 'error')
             return render_template('signup.html', programs=programs)
-        # ── Whitelist check: only enrolled student emails can register ──
-        allowed = conn.execute(
-            'SELECT id FROM allowed_student_emails WHERE LOWER(email) = LOWER(?)',
-            (email,)
-        ).fetchone()
-        if not allowed:
-            flash('Your email is not registered. Contact your admin.', 'error')
-            return render_template('signup.html', programs=programs)
         try:
             conn = get_db()
             conn.execute('''
@@ -1023,15 +1054,6 @@ def signup_teacher():
             return render_template('signup_teacher.html')
         if password != confirm_password:
             flash('Passwords do not match.', 'error')
-            return render_template('signup_teacher.html')
-        # ── Whitelist check: only pre-approved teacher emails can register ──
-        conn = get_db()
-        allowed = conn.execute(
-            'SELECT id FROM allowed_teacher_emails WHERE LOWER(email) = LOWER(?)',
-            (email,)
-        ).fetchone()
-        if not allowed:
-            flash('Your email is not registered. Contact your admin.', 'error')
             return render_template('signup_teacher.html')
         try:
             conn = get_db()
@@ -1292,6 +1314,7 @@ def student_take_exam(exam_id):
         questions = conn.execute('SELECT * FROM questions WHERE exam_id=?', (exam_id,)).fetchall()
         total_points = sum(q['points'] for q in questions)
         score = 0
+        has_essay = any(q['question_type'] == 'essay' for q in questions)
 
         for q in questions:
             ans = request.form.get(f'answer_{q["id"]}', '').strip()
@@ -1300,13 +1323,17 @@ def student_take_exam(exam_id):
                 VALUES (?, ?, ?)
             ''', (sess_id, q['id'], ans))
             # Fill-in-the-blank earns partial credit per blank; everything
-            # else is all-or-nothing. Case-sensitivity is honoured.
+            # else is all-or-nothing. Case-sensitivity is honoured. Essay
+            # questions always contribute 0 here — they earn no credit until
+            # a teacher manually grades them against the rubric.
             score += q['points'] * question_credit(q, ans)
 
+        # Essay questions mean this submission's score isn't final yet — the
+        # student sees "pending" until every essay answer has been graded.
         conn.execute('''
             UPDATE exam_sessions SET status='submitted', submitted_at=CURRENT_TIMESTAMP,
-            score=?, total_points=? WHERE id=?
-        ''', (score, total_points, sess_id))
+            score=?, total_points=?, needs_grading=? WHERE id=?
+        ''', (score, total_points, 1 if has_essay else 0, sess_id))
         conn.commit()
         return redirect(url_for('student_exam_result', exam_id=exam_id))
 
@@ -1502,6 +1529,11 @@ def student_exam_result(exam_id):
                     })
                 qd['fib_blanks'] = blank_results
                 qd['text_parts'] = fib_split_text(q['question_text'])
+            elif q['question_type'] == 'essay':
+                qd['is_graded'] = bool(ans and ans['manual_score'] is not None)
+                qd['manual_score'] = ans['manual_score'] if ans else None
+                qd['feedback'] = ans['feedback'] if ans else ''
+                is_correct = None  # not applicable for essay — shown as graded/pending instead
             else:
                 # Same grader as submit-time scoring, so the review always
                 # agrees with the score (incl. case-sensitive questions).
@@ -1819,6 +1851,13 @@ def teacher_exam_detail(exam_id):
                 qd['choices'] = [dict(c) for c in choices]
             else:
                 qd['choices'] = []
+            if q['question_type'] == 'essay':
+                criteria = conn.execute(
+                    'SELECT * FROM rubric_criteria WHERE question_id=? ORDER BY order_index', (q['id'],)
+                ).fetchall()
+                qd['rubric_criteria'] = [dict(c) for c in criteria]
+            else:
+                qd['rubric_criteria'] = []
             q_list.append(qd)
         section_data.append({'section': dict(sec), 'questions': q_list})
     raw_bank = conn.execute('''
@@ -1881,7 +1920,8 @@ def teacher_exam_monitoring(exam_id):
 
     # Results data for the Results tab
     results = conn.execute('''
-        SELECT u.full_name, u.id as student_id, es.score, es.total_points, es.status, es.submitted_at, es.tab_switch_count
+        SELECT u.full_name, u.id as student_id, es.score, es.total_points, es.status, es.submitted_at, es.tab_switch_count,
+               COALESCE(es.needs_grading, 0) as needs_grading
         FROM exam_sessions es JOIN users u ON es.student_id = u.id
         WHERE es.exam_id=?
         ORDER BY es.score DESC
@@ -1907,7 +1947,13 @@ def teacher_exam_monitoring(exam_id):
     _correct_counts = count_fully_correct(conn, exam_id, questions_raw)
     for q in questions_raw:
         correct_count = _correct_counts.get(q['id'], 0)
-        pct = round((correct_count / total_submitted * 100)) if total_submitted else 0
+        if q['question_type'] == 'essay':
+            # Essays are rarely 100% correct — show the average score
+            # percentage across graded submissions instead of a binary rate.
+            _essay_pct = avg_essay_pct(conn, exam_id, q['id'], q['points'])
+            pct = _essay_pct if _essay_pct is not None else 0
+        else:
+            pct = round((correct_count / total_submitted * 100)) if total_submitted else 0
         question_stats.append({
             'question_text': q['question_text'],
             'question_type': q['question_type'],
@@ -1937,7 +1983,8 @@ def teacher_exam_results(exam_id):
         flash('Exam not found.', 'error')
         return redirect(url_for('teacher_home'))
     results = conn.execute('''
-        SELECT u.full_name, u.id as student_id, es.score, es.total_points, es.status, es.submitted_at, es.tab_switch_count
+        SELECT u.full_name, u.id as student_id, es.score, es.total_points, es.status, es.submitted_at, es.tab_switch_count,
+               COALESCE(es.needs_grading, 0) as needs_grading
         FROM exam_sessions es JOIN users u ON es.student_id = u.id
         WHERE es.exam_id=?
         ORDER BY es.score DESC
@@ -1965,7 +2012,13 @@ def teacher_exam_results(exam_id):
     _correct_counts = count_fully_correct(conn, exam_id, questions_raw)
     for q in questions_raw:
         correct_count = _correct_counts.get(q['id'], 0)
-        pct = round((correct_count / total_submitted * 100)) if total_submitted else 0
+        if q['question_type'] == 'essay':
+            # Essays are rarely 100% correct — show the average score
+            # percentage across graded submissions instead of a binary rate.
+            _essay_pct = avg_essay_pct(conn, exam_id, q['id'], q['points'])
+            pct = _essay_pct if _essay_pct is not None else 0
+        else:
+            pct = round((correct_count / total_submitted * 100)) if total_submitted else 0
         question_stats.append({
             'question_text': q['question_text'],
             'question_type': q['question_type'],
@@ -2096,6 +2149,21 @@ def teacher_view_student_result(exam_id, student_id):
                 })
             qd['fib_blanks'] = blank_results
             qd['text_parts'] = fib_split_text(q['question_text'])
+        elif q['question_type'] == 'essay':
+            criteria = conn.execute(
+                'SELECT * FROM rubric_criteria WHERE question_id=? ORDER BY order_index', (q['id'],)
+            ).fetchall()
+            qd['rubric_criteria'] = [dict(c) for c in criteria]
+            qd['answer_id'] = ans['id'] if ans else None
+            qd['is_graded'] = bool(ans and ans['manual_score'] is not None)
+            qd['manual_score'] = ans['manual_score'] if ans else None
+            qd['feedback'] = ans['feedback'] if ans else ''
+            scores_map = {}
+            if ans:
+                rows = conn.execute('SELECT * FROM rubric_scores WHERE answer_id=?', (ans['id'],)).fetchall()
+                scores_map = {r['criterion_id']: r['score'] for r in rows}
+            qd['rubric_scores_map'] = scores_map
+            is_correct = None  # essay has no simple correct/incorrect — shown as graded/pending instead
         else:
             is_correct = question_credit(q, qd['student_answer']) >= 1.0
         qd['is_correct'] = is_correct
@@ -2103,6 +2171,84 @@ def teacher_view_student_result(exam_id, student_id):
 
     return render_template('teacher/student_exam_result.html', exam=exam, student=student,
                            exam_session=exam_sess, questions=questions)
+
+@app.route('/teacher/exam/<int:exam_id>/student/<int:student_id>/grade-essay/<int:question_id>', methods=['POST'])
+@role_required('teacher')
+def teacher_grade_essay(exam_id, student_id, question_id):
+    """Saves a teacher's rubric scores + feedback for one student's essay
+    answer, then recomputes that student's overall exam score and whether
+    the submission still has other ungraded essay questions pending."""
+    conn = get_db()
+    exam = conn.execute('''
+        SELECT e.*, c.teacher_id FROM exams e JOIN classes c ON e.class_id = c.id WHERE e.id=?
+    ''', (exam_id,)).fetchone()
+    if not exam or int(exam['teacher_id']) != int(session['user_id']):
+        flash('Exam not found.', 'error')
+        return redirect(url_for('teacher_home'))
+
+    q = conn.execute('SELECT * FROM questions WHERE id=? AND exam_id=?', (question_id, exam_id)).fetchone()
+    if not q or q['question_type'] != 'essay':
+        flash('Question not found.', 'error')
+        return redirect(url_for('teacher_view_student_result', exam_id=exam_id, student_id=student_id))
+
+    exam_sess = conn.execute(
+        'SELECT * FROM exam_sessions WHERE exam_id=? AND student_id=?', (exam_id, student_id)
+    ).fetchone()
+    if not exam_sess:
+        flash('Submission not found.', 'error')
+        return redirect(url_for('teacher_exam_monitoring', exam_id=exam_id) + '#results')
+
+    ans = conn.execute(
+        'SELECT * FROM answers WHERE session_id=? AND question_id=?', (exam_sess['id'], question_id)
+    ).fetchone()
+    if not ans:
+        flash('This student did not answer that question.', 'error')
+        return redirect(url_for('teacher_view_student_result', exam_id=exam_id, student_id=student_id))
+
+    criteria = conn.execute('SELECT * FROM rubric_criteria WHERE question_id=?', (question_id,)).fetchall()
+    feedback = request.form.get('feedback', '').strip()
+    total = 0.0
+    for crit in criteria:
+        raw = request.form.get(f'rubric_score_{crit["id"]}', '0').strip()
+        try:
+            given = float(raw)
+        except ValueError:
+            given = 0.0
+        given = max(0.0, min(given, crit['max_points']))  # clamp to the criterion's range
+        total += given
+        conn.execute('''
+            INSERT INTO rubric_scores (answer_id, criterion_id, score) VALUES (?,?,?)
+            ON CONFLICT(answer_id, criterion_id) DO UPDATE SET score=excluded.score
+        ''', (ans['id'], crit['id'], given))
+
+    conn.execute('''
+        UPDATE answers SET manual_score=?, feedback=?, graded_by=?, graded_at=CURRENT_TIMESTAMP
+        WHERE id=?
+    ''', (total, feedback, session['user_id'], ans['id']))
+    conn.commit()
+
+    # Recompute this student's overall score now that one more essay is graded,
+    # and check whether any OTHER essay answers in this submission are still
+    # waiting to be graded.
+    all_qs = conn.execute('SELECT * FROM questions WHERE exam_id=?', (exam_id,)).fetchall()
+    new_score = 0.0
+    still_pending = False
+    for aq in all_qs:
+        aq_ans = conn.execute(
+            'SELECT * FROM answers WHERE session_id=? AND question_id=?', (exam_sess['id'], aq['id'])
+        ).fetchone()
+        a_text = aq_ans['answer_text'] if aq_ans else ''
+        a_manual = aq_ans['manual_score'] if aq_ans else None
+        new_score += aq['points'] * question_credit(aq, a_text, a_manual)
+        if aq['question_type'] == 'essay' and a_manual is None:
+            still_pending = True
+
+    conn.execute('UPDATE exam_sessions SET score=?, needs_grading=? WHERE id=?',
+                 (new_score, 1 if still_pending else 0, exam_sess['id']))
+    conn.commit()
+
+    flash('Grade saved.', 'success')
+    return redirect(url_for('teacher_view_student_result', exam_id=exam_id, student_id=student_id) + f'#q-{question_id}')
 
 @app.route('/teacher/exam/<int:exam_id>/toggle-status', methods=['POST'])
 @role_required('teacher')
@@ -2420,13 +2566,17 @@ def teacher_add_question(section_id):
     exam_id = sec['exam_id']
     q_text = request.form.get('question_text', '').strip()
     q_type = request.form.get('question_type', '').strip()
-    if q_type not in ('multiple_choice', 'short_answer', 'fill_blank'):
+    if q_type not in ('multiple_choice', 'short_answer', 'fill_blank', 'essay', 'true_false'):
         q_type = sec['section_type']
     points = request.form.get('points', 1, type=int)
     if q_type == 'multiple_choice':
         correct = request.form.get('correct_answer_mc', '').strip()
+    elif q_type == 'true_false':
+        correct = request.form.get('correct_answer_tf', '').strip()  # "True" or "False"
     elif q_type == 'fill_blank':
         correct = request.form.get('correct_answer_fib', '').strip()
+    elif q_type == 'essay':
+        correct = None  # essay questions have no single "correct answer"
     else:
         correct = request.form.get('correct_answer_sa', '').strip()
     case_sensitive = 1 if request.form.get('case_sensitive') else 0
@@ -2451,6 +2601,22 @@ def teacher_add_question(section_id):
             if _wants_json():
                 return jsonify({'ok': False, 'error': msg}), 400
             return redirect(url_for('teacher_exam_detail', exam_id=exam_id))
+    if q_type == 'true_false' and q_text and correct not in ('True', 'False'):
+        msg = 'Please select whether True or False is the correct answer.'
+        flash(msg, 'error')
+        if _wants_json():
+            return jsonify({'ok': False, 'error': msg}), 400
+        return redirect(url_for('teacher_exam_detail', exam_id=exam_id))
+    rubric_criteria = None
+    if q_type == 'essay' and q_text:
+        rubric_criteria = rubric_collect_criteria(request.form)
+        ok, err = rubric_validate(rubric_criteria)
+        if not ok:
+            flash(err, 'error')
+            if _wants_json():
+                return jsonify({'ok': False, 'error': err}), 400
+            return redirect(url_for('teacher_exam_detail', exam_id=exam_id))
+        points = sum(p for _, p in rubric_criteria)  # question's max points = sum of rubric points
     if q_text:
         count = conn.execute('SELECT COUNT(*) FROM questions WHERE section_id=?', (section_id,)).fetchone()[0]
         # Questions added directly to an exam section are NOT part of the
@@ -2465,6 +2631,12 @@ def teacher_add_question(section_id):
             for label, ct in mc_choices:
                 conn.execute('INSERT INTO choices (question_id, choice_label, choice_text) VALUES (?,?,?)',
                              (q_id, label, ct))
+        if rubric_criteria is not None:
+            for idx, (crit_text, max_pts) in enumerate(rubric_criteria):
+                conn.execute('''
+                    INSERT INTO rubric_criteria (question_id, criterion_text, max_points, order_index)
+                    VALUES (?,?,?,?)
+                ''', (q_id, crit_text, max_pts, idx))
         conn.commit()
         flash('Question added.', 'success')
         if _wants_json():
@@ -2568,6 +2740,24 @@ def teacher_edit_question(question_id):
             if redirect_to == 'bank' or not exam_id:
                 return redirect(url_for('teacher_question_bank'))
             return redirect(url_for('teacher_exam_detail', exam_id=exam_id))
+    if q['question_type'] == 'true_false' and correct not in ('True', 'False'):
+        flash('Please select whether True or False is the correct answer.', 'error')
+        redirect_to = request.form.get('redirect_to', '')
+        if redirect_to == 'bank' or not exam_id:
+            return redirect(url_for('teacher_question_bank'))
+        return redirect(url_for('teacher_exam_detail', exam_id=exam_id))
+    rubric_criteria = None
+    if q['question_type'] == 'essay':
+        rubric_criteria = rubric_collect_criteria(request.form)
+        ok, err = rubric_validate(rubric_criteria)
+        if not ok:
+            flash(err, 'error')
+            redirect_to = request.form.get('redirect_to', '')
+            if redirect_to == 'bank' or not exam_id:
+                return redirect(url_for('teacher_question_bank'))
+            return redirect(url_for('teacher_exam_detail', exam_id=exam_id))
+        correct = None
+        points = sum(p for _, p in rubric_criteria)
     conn.execute('UPDATE questions SET question_text=?, correct_answer=?, points=?, bank_group_id=?, case_sensitive=? WHERE id=?',
                  (q_text, correct, points, bank_group_id, case_sensitive, question_id))
     if mc_choices is not None:
@@ -2575,6 +2765,13 @@ def teacher_edit_question(question_id):
         for label, ct in mc_choices:
             conn.execute('INSERT INTO choices (question_id, choice_label, choice_text) VALUES (?,?,?)',
                          (question_id, label, ct))
+    if rubric_criteria is not None:
+        conn.execute('DELETE FROM rubric_criteria WHERE question_id=?', (question_id,))
+        for idx, (crit_text, max_pts) in enumerate(rubric_criteria):
+            conn.execute('''
+                INSERT INTO rubric_criteria (question_id, criterion_text, max_points, order_index)
+                VALUES (?,?,?,?)
+            ''', (question_id, crit_text, max_pts, idx))
     conn.commit()
     flash('Question updated.', 'success')
     redirect_to = request.form.get('redirect_to', '')
@@ -3395,267 +3592,6 @@ def admin_profile():
     return render_template('admin/profile.html', user=user)
 
 
-# ─── Allowed Email Whitelist Management ─────────────────────────────────────
-
-@app.route('/admin/allowed-emails/students')
-@role_required('admin')
-def admin_allowed_students():
-    conn = get_db()
-    search = request.args.get('search', '').strip()
-    if search:
-        emails = conn.execute(
-            'SELECT * FROM allowed_student_emails WHERE email LIKE ? ORDER BY email',
-            (f'%{search}%',)
-        ).fetchall()
-    else:
-        emails = conn.execute('SELECT * FROM allowed_student_emails ORDER BY email').fetchall()
-    total = conn.execute('SELECT COUNT(*) FROM allowed_student_emails').fetchone()[0]
-    return render_template('admin/allowed_students.html', emails=emails, total=total, search=search)
-
-@app.route('/admin/allowed-emails/students/add', methods=['POST'])
-@role_required('admin')
-def admin_add_student_email():
-    email = request.form.get('email', '').strip().lower()
-    if not email:
-        flash('Please enter an email address.', 'error')
-    else:
-        conn = get_db()
-        try:
-            conn.execute('INSERT INTO allowed_student_emails (email) VALUES (?)', (email,))
-            conn.commit()
-            flash(f'Added {email} to allowed student emails.', 'success')
-        except Exception:
-            flash(f'Email {email} is already in the list.', 'error')
-    return redirect(url_for('admin_allowed_students'))
-
-@app.route('/admin/allowed-emails/students/bulk', methods=['POST'])
-@role_required('admin')
-def admin_bulk_add_student_emails():
-    raw = request.form.get('emails_bulk', '')
-    import re
-    emails = [e.strip().lower() for e in re.split(r'[,;\n\r\s]+', raw) if e.strip()]
-    valid_emails = [e for e in emails if '@' in e and '.' in e.split('@')[-1]]
-    conn = get_db()
-    added = 0
-    skipped = 0
-    for email in valid_emails:
-        try:
-            conn.execute('INSERT INTO allowed_student_emails (email) VALUES (?)', (email,))
-            added += 1
-        except Exception:
-            skipped += 1
-    conn.commit()
-    if added:
-        flash(f'Successfully added {added} student email(s).', 'success')
-    if skipped:
-        flash(f'{skipped} email(s) were already in the list (skipped).', 'error')
-    if not valid_emails:
-        flash('No valid emails found. Make sure each email contains @ and a domain.', 'error')
-    return redirect(url_for('admin_allowed_students'))
-
-@app.route('/admin/allowed-emails/students/delete/<int:email_id>', methods=['POST'])
-@role_required('admin')
-def admin_delete_student_email(email_id):
-    conn = get_db()
-    conn.execute('DELETE FROM allowed_student_emails WHERE id = ?', (email_id,))
-    conn.commit()
-    flash('Email removed from allowed list.', 'success')
-    return redirect(url_for('admin_allowed_students'))
-
-@app.route('/admin/allowed-emails/students/upload', methods=['POST'])
-@role_required('admin')
-def admin_upload_student_emails():
-    """Direct bulk import: use this when the registrar already hands over a
-    ready-made list (Excel/CSV/Word/PDF) that already contains emails."""
-    file = request.files.get('emails_file')
-    if not file or not file.filename:
-        flash('Please choose a file to upload.', 'error')
-        return redirect(url_for('admin_allowed_students'))
-    try:
-        emails = extract_emails_from_file(file)
-    except ValueError as e:
-        flash(str(e), 'error')
-        return redirect(url_for('admin_allowed_students'))
-    except Exception:
-        flash('Could not read that file. Make sure it is a valid .csv, .xlsx, .docx, or .pdf file.', 'error')
-        return redirect(url_for('admin_allowed_students'))
-
-    conn = get_db()
-    added, skipped = 0, 0
-    for email in emails:
-        try:
-            conn.execute('INSERT INTO allowed_student_emails (email) VALUES (?)', (email,))
-            added += 1
-        except Exception:
-            skipped += 1
-    conn.commit()
-    if added:
-        flash(f'Successfully added {added} student email(s) from {file.filename}.', 'success')
-    if skipped:
-        flash(f'{skipped} email(s) were already in the list (skipped).', 'error')
-    if not emails:
-        flash('No valid email addresses were found in that file.', 'error')
-    return redirect(url_for('admin_allowed_students'))
-
-@app.route('/admin/allowed-emails/students/cor-preview', methods=['POST'])
-@role_required('admin')
-def admin_cor_preview():
-    """Step 1 of COR auto-detect: parse one or more uploaded COR PDFs and show
-    a review table (student info + the auto-generated email) BEFORE anything
-    is added to the whitelist, so the admin can catch a bad OCR/parse instead
-    of blindly trusting it."""
-    files = request.files.getlist('cor_files')
-    files = [f for f in files if f and f.filename]
-    if not files:
-        flash('Please choose one or more COR PDF files.', 'error')
-        return redirect(url_for('admin_allowed_students'))
-
-    conn = get_db()
-    already_allowed = {r['email'] for r in conn.execute('SELECT email FROM allowed_student_emails').fetchall()}
-
-    results = []
-    for f in files:
-        if not f.filename.lower().endswith('.pdf'):
-            results.append({'filename': f.filename, 'ok': False, 'reason': 'Not a PDF file'})
-            continue
-        try:
-            info = parse_cor_pdf(f)
-        except Exception:
-            info = None
-        if not info:
-            results.append({'filename': f.filename, 'ok': False,
-                             'reason': "Couldn't find Student No / Name on this file — may be a scanned image or different layout"})
-            continue
-        info['filename'] = f.filename
-        info['ok'] = True
-        info['already_allowed'] = info['generated_email'] in already_allowed
-        results.append(info)
-
-    return render_template('admin/cor_preview.html', results=results)
-
-@app.route('/admin/allowed-emails/students/cor-confirm', methods=['POST'])
-@role_required('admin')
-def admin_cor_confirm():
-    """Step 2 of COR auto-detect: the admin has reviewed the preview table
-    and is now confirming which generated emails should actually be added."""
-    emails = request.form.getlist('confirm_email')
-    conn = get_db()
-    added, skipped = 0, 0
-    for email in emails:
-        email = email.strip().lower()
-        if not email:
-            continue
-        try:
-            conn.execute('INSERT INTO allowed_student_emails (email) VALUES (?)', (email,))
-            added += 1
-        except Exception:
-            skipped += 1
-    conn.commit()
-    if added:
-        flash(f'Successfully added {added} student email(s) from COR upload.', 'success')
-    if skipped:
-        flash(f'{skipped} email(s) were already in the list (skipped).', 'error')
-    if not emails:
-        flash('No emails were selected to add.', 'error')
-    return redirect(url_for('admin_allowed_students'))
-
-@app.route('/admin/allowed-emails/teachers')
-@role_required('admin')
-def admin_allowed_teachers():
-    conn = get_db()
-    search = request.args.get('search', '').strip()
-    if search:
-        emails = conn.execute(
-            'SELECT * FROM allowed_teacher_emails WHERE email LIKE ? ORDER BY email',
-            (f'%{search}%',)
-        ).fetchall()
-    else:
-        emails = conn.execute('SELECT * FROM allowed_teacher_emails ORDER BY email').fetchall()
-    total = conn.execute('SELECT COUNT(*) FROM allowed_teacher_emails').fetchone()[0]
-    return render_template('admin/allowed_teachers.html', emails=emails, total=total, search=search)
-
-@app.route('/admin/allowed-emails/teachers/add', methods=['POST'])
-@role_required('admin')
-def admin_add_teacher_email():
-    email = request.form.get('email', '').strip().lower()
-    if not email:
-        flash('Please enter an email address.', 'error')
-    else:
-        conn = get_db()
-        try:
-            conn.execute('INSERT INTO allowed_teacher_emails (email) VALUES (?)', (email,))
-            conn.commit()
-            flash(f'Added {email} to allowed teacher emails.', 'success')
-        except Exception:
-            flash(f'Email {email} is already in the list.', 'error')
-    return redirect(url_for('admin_allowed_teachers'))
-
-@app.route('/admin/allowed-emails/teachers/bulk', methods=['POST'])
-@role_required('admin')
-def admin_bulk_add_teacher_emails():
-    raw = request.form.get('emails_bulk', '')
-    import re
-    emails = [e.strip().lower() for e in re.split(r'[,;\n\r\s]+', raw) if e.strip()]
-    valid_emails = [e for e in emails if '@' in e and '.' in e.split('@')[-1]]
-    conn = get_db()
-    added = 0
-    skipped = 0
-    for email in valid_emails:
-        try:
-            conn.execute('INSERT INTO allowed_teacher_emails (email) VALUES (?)', (email,))
-            added += 1
-        except Exception:
-            skipped += 1
-    conn.commit()
-    if added:
-        flash(f'Successfully added {added} teacher email(s).', 'success')
-    if skipped:
-        flash(f'{skipped} email(s) were already in the list (skipped).', 'error')
-    if not valid_emails:
-        flash('No valid emails found. Make sure each email contains @ and a domain.', 'error')
-    return redirect(url_for('admin_allowed_teachers'))
-
-@app.route('/admin/allowed-emails/teachers/delete/<int:email_id>', methods=['POST'])
-@role_required('admin')
-def admin_delete_teacher_email(email_id):
-    conn = get_db()
-    conn.execute('DELETE FROM allowed_teacher_emails WHERE id = ?', (email_id,))
-    conn.commit()
-    flash('Email removed from allowed list.', 'success')
-    return redirect(url_for('admin_allowed_teachers'))
-
-@app.route('/admin/allowed-emails/teachers/upload', methods=['POST'])
-@role_required('admin')
-def admin_upload_teacher_emails():
-    file = request.files.get('emails_file')
-    if not file or not file.filename:
-        flash('Please choose a file to upload.', 'error')
-        return redirect(url_for('admin_allowed_teachers'))
-    try:
-        emails = extract_emails_from_file(file)
-    except ValueError as e:
-        flash(str(e), 'error')
-        return redirect(url_for('admin_allowed_teachers'))
-    except Exception:
-        flash('Could not read that file. Make sure it is a valid .csv, .xlsx, .docx, or .pdf file.', 'error')
-        return redirect(url_for('admin_allowed_teachers'))
-
-    conn = get_db()
-    added, skipped = 0, 0
-    for email in emails:
-        try:
-            conn.execute('INSERT INTO allowed_teacher_emails (email) VALUES (?)', (email,))
-            added += 1
-        except Exception:
-            skipped += 1
-    conn.commit()
-    if added:
-        flash(f'Successfully added {added} teacher email(s) from {file.filename}.', 'success')
-    if skipped:
-        flash(f'{skipped} email(s) were already in the list (skipped).', 'error')
-    if not emails:
-        flash('No valid email addresses were found in that file.', 'error')
-    return redirect(url_for('admin_allowed_teachers'))
 
 # ─── Enhanced Admin Routes ────────────────────────────────────────────────────
 
@@ -3798,7 +3734,7 @@ def admin_exam_analytics(exam_id):
     # Per-question correctness (submitted sessions only), graded with the same
     # rules as scoring so fill-in-the-blank / case-sensitive questions are right.
     q_rows = conn.execute("""
-        SELECT q.id, q.question_text, q.question_type, q.correct_answer,
+        SELECT q.id, q.question_text, q.question_type, q.correct_answer, q.points,
                COALESCE(q.case_sensitive, 0) AS case_sensitive,
                s.title as section_title, s.order_index as sec_order, q.order_index
         FROM questions q LEFT JOIN sections s ON q.section_id = s.id
@@ -3814,10 +3750,17 @@ def admin_exam_analytics(exam_id):
     for q in q_rows:
         total_ans = answer_totals.get(q['id'], 0)
         if total_ans > 0:
+            if q['question_type'] == 'essay':
+                # Essays are rarely 100% correct — show the average score
+                # percentage across graded submissions instead of a binary rate.
+                _essay_pct = avg_essay_pct(conn, exam_id, q['id'], q['points'])
+                rate = _essay_pct if _essay_pct is not None else 0
+            else:
+                rate = round((correct_counts[q['id']] / total_ans) * 100, 1)
             hard_questions_list.append({
                 'question_text': q['question_text'], 'question_type': q['question_type'],
                 'correct_count': correct_counts[q['id']], 'total_answers': total_ans,
-                'rate': round((correct_counts[q['id']] / total_ans) * 100, 1),
+                'rate': rate,
             })
     hard_questions_list.sort(key=lambda x: x['rate'])
     hard_questions_list = hard_questions_list[:10]
@@ -3837,7 +3780,11 @@ def admin_exam_analytics(exam_id):
             section_agg[title] = {'section_title': title, 'question_count': 0, 'pct_sum': 0}
             section_order.append(title)
         _tot = answer_totals.get(r['id'], 0)
-        pct = round((correct_counts[r['id']] / _tot) * 100) if _tot else 0
+        if r['question_type'] == 'essay':
+            _essay_pct = avg_essay_pct(conn, exam_id, r['id'], r['points'])
+            pct = _essay_pct if _essay_pct is not None else 0
+        else:
+            pct = round((correct_counts[r['id']] / _tot) * 100) if _tot else 0
         section_agg[title]['question_count'] += 1
         section_agg[title]['pct_sum'] += pct
     section_stats = []
@@ -4169,7 +4116,7 @@ def api_monitoring(exam_id):
     session_ids = [r['id'] for r in submitted_sessions]
 
     questions_raw = conn.execute('''
-        SELECT q.id, q.question_text, q.question_type, q.correct_answer,
+        SELECT q.id, q.question_text, q.question_type, q.correct_answer, q.points,
                COALESCE(q.case_sensitive, 0) AS case_sensitive,
                s.title as section_title, q.order_index, s.order_index as sec_order
         FROM questions q
@@ -4182,7 +4129,11 @@ def api_monitoring(exam_id):
     _correct_counts = count_fully_correct(conn, exam_id, questions_raw)
     for q in questions_raw:
         correct_count = _correct_counts.get(q['id'], 0)
-        pct = round((correct_count / total_submitted * 100)) if total_submitted else 0
+        if q['question_type'] == 'essay':
+            _essay_pct = avg_essay_pct(conn, exam_id, q['id'], q['points'])
+            pct = _essay_pct if _essay_pct is not None else 0
+        else:
+            pct = round((correct_count / total_submitted * 100)) if total_submitted else 0
         question_stats.append({
             'question_text': q['question_text'],
             'section_title': q['section_title'],
@@ -4260,7 +4211,11 @@ def api_results(exam_id):
     _correct_counts = count_fully_correct(conn, exam_id, questions_raw)
     for q in questions_raw:
         correct_count = _correct_counts.get(q['id'], 0)
-        pct = round((correct_count / total_submitted * 100)) if total_submitted else 0
+        if q['question_type'] == 'essay':
+            _essay_pct = avg_essay_pct(conn, exam_id, q['id'], q['points'])
+            pct = _essay_pct if _essay_pct is not None else 0
+        else:
+            pct = round((correct_count / total_submitted * 100)) if total_submitted else 0
         question_stats.append({
             'question_text': q['question_text'],
             'section_title': q['section_title'],

@@ -89,6 +89,9 @@
             {% else %}
               <span class="badge badge-red">Failed</span>
             {% endif %}
+            {% if r.needs_grading %}
+              <span class="badge badge-yellow text-xs" title="Has essay answers awaiting manual grading">⏳ Needs Grading</span>
+            {% endif %}
           </td>
           <td class="text-sm text-muted">{{ r.submitted_at or '—' }}</td>
           <td>
