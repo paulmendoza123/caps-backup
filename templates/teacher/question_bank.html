@@ -397,11 +397,17 @@ function updateImportPreview(input) {
           <div class="type-pill" id="pill-mc" onclick="selectType('multiple_choice')">
             🔘 Multiple Choice
           </div>
+          <div class="type-pill" id="pill-tf" onclick="selectType('true_false')">
+            ⚖️ True / False
+          </div>
           <div class="type-pill" id="pill-sa" onclick="selectType('short_answer')">
             ✏️ Short Answer
           </div>
           <div class="type-pill" id="pill-fib" onclick="selectType('fill_blank')">
             ▭ Fill in the Blank
+          </div>
+          <div class="type-pill" id="pill-essay" onclick="selectType('essay')">
+            📝 Essay
           </div>
         </div>
         <input type="hidden" name="question_type" id="bankQType">
@@ -438,6 +444,41 @@ function updateImportPreview(input) {
         </div>
       </div>
 
+      {# True/False answer #}
+      <div id="bqTF" style="display:none">
+        <div class="form-group">
+          <label class="form-label">Correct Answer</label>
+          <div class="flex gap-2">
+            <label class="text-sm" style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+              <input type="radio" name="bank_tf_answer" value="True" /> True
+            </label>
+            <label class="text-sm" style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+              <input type="radio" name="bank_tf_answer" value="False" /> False
+            </label>
+          </div>
+        </div>
+      </div>
+
+      {# Essay rubric #}
+      <div id="bqEssay" style="display:none">
+        <div class="text-xs text-muted mb-1">Essay questions are always graded manually against the rubric below. Total points = sum of criteria.</div>
+        <div class="form-group">
+          <label class="form-label">Rubric Criteria</label>
+          <div class="rubric-rows" data-rubric-rows>
+            <div class="form-row rubric-row" style="grid-template-columns:1fr 100px 32px;gap:0.5rem;align-items:end;margin-bottom:0.4rem">
+              <div class="form-group" style="margin:0">
+                <input type="text" name="rubric_text[]" class="form-control" placeholder="e.g. Content & Ideas" />
+              </div>
+              <div class="form-group" style="margin:0">
+                <input type="number" name="rubric_points[]" class="form-control" min="1" placeholder="Pts" />
+              </div>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="this.closest('.rubric-row').remove()" title="Remove criterion">✕</button>
+            </div>
+          </div>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="rubricAddRow(this)">+ Add Criterion</button>
+        </div>
+      </div>
+
       {# SA answer #}
       <div id="bqShort" style="display:none">
         <div class="form-group">
@@ -466,7 +507,7 @@ function updateImportPreview(input) {
 
       {# Points + Group in a row #}
       <div class="form-row" style="grid-template-columns:100px 1fr;margin-top:0.25rem">
-        <div class="form-group">
+        <div class="form-group" id="bqPointsField">
           <label class="form-label">Points</label>
           <input type="number" name="points" class="form-control" value="1" min="1">
         </div>
@@ -674,11 +715,17 @@ document.addEventListener('DOMContentLoaded', function () {
 function selectType(type) {
   document.getElementById('bankQType').value = type;
   document.getElementById('pill-mc').classList.toggle('active', type === 'multiple_choice');
+  document.getElementById('pill-tf').classList.toggle('active', type === 'true_false');
   document.getElementById('pill-sa').classList.toggle('active', type === 'short_answer');
   document.getElementById('pill-fib').classList.toggle('active', type === 'fill_blank');
+  document.getElementById('pill-essay').classList.toggle('active', type === 'essay');
   document.getElementById('bqChoices').style.display = type === 'multiple_choice' ? '' : 'none';
+  document.getElementById('bqTF').style.display      = type === 'true_false'      ? '' : 'none';
   document.getElementById('bqShort').style.display   = type === 'short_answer'   ? '' : 'none';
   document.getElementById('bqFib').style.display     = type === 'fill_blank'     ? '' : 'none';
+  document.getElementById('bqEssay').style.display   = type === 'essay'          ? '' : 'none';
+  // Essay points are computed from the rubric, not typed directly — hide the field.
+  document.getElementById('bqPointsField').style.display = type === 'essay' ? 'none' : '';
   document.getElementById('bankSubmitBtn').disabled = false;
   const qTypeFilter = document.getElementById('qTypeFilter');
   if (qTypeFilter) { qTypeFilter.value = type; filterQ(); }
@@ -740,10 +787,48 @@ function bankSubmitValidate(e) {
       alert(`Fill in the Blank questions need one "___" per answer group. Found ${blankCount} blank(s) but ${ansCount} answer group(s).`);
       return false;
     }
+  } else if (type === 'true_false') {
+    const sel = document.querySelector('input[name="bank_tf_answer"]:checked');
+    if (!sel) {
+      e.preventDefault();
+      alert('Please select whether True or False is the correct answer.');
+      return false;
+    }
+    ca.value = sel.value;
+  } else if (type === 'essay') {
+    const rows = Array.from(document.querySelectorAll('#bqEssay .rubric-row')).filter(r => {
+      const t = r.querySelector('input[name="rubric_text[]"]');
+      const p = r.querySelector('input[name="rubric_points[]"]');
+      return t && t.value.trim() && p && parseInt(p.value) > 0;
+    });
+    if (rows.length === 0) {
+      e.preventDefault();
+      alert('Essay questions require at least one rubric criterion with points greater than 0.');
+      return false;
+    }
+    ca.value = '';
   } else {
     ca.value = document.getElementById('bankSaAnswer').value;
   }
   return true;
+}
+
+/* Rubric criteria builder — add/remove rows */
+function rubricAddRow(btn) {
+  const container = btn.previousElementSibling;
+  const row = document.createElement('div');
+  row.className = 'form-row rubric-row';
+  row.style.cssText = 'grid-template-columns:1fr 100px 32px;gap:0.5rem;align-items:end;margin-bottom:0.4rem';
+  row.innerHTML = `
+    <div class="form-group" style="margin:0">
+      <input type="text" name="rubric_text[]" class="form-control" placeholder="e.g. Content & Ideas" />
+    </div>
+    <div class="form-group" style="margin:0">
+      <input type="number" name="rubric_points[]" class="form-control" min="1" placeholder="Pts" />
+    </div>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="this.closest('.rubric-row').remove()" title="Remove criterion">✕</button>
+  `;
+  container.appendChild(row);
 }
 
 /* ── Group inline create ── */
@@ -813,8 +898,10 @@ function confirmDeleteGroup(id, name, qcount) {
   <select id="qTypeFilter" class="form-select" style="width:160px;flex-shrink:0" onchange="filterQ()">
     <option value="all">All Types</option>
     <option value="multiple_choice">Multiple Choice</option>
+    <option value="true_false">True / False</option>
     <option value="short_answer">Short Answer</option>
     <option value="fill_blank">Fill in the Blank</option>
+    <option value="essay">Essay</option>
   </select>
   <select id="qGroupFilter" class="form-select" style="width:180px;flex-shrink:0" onchange="filterQ()">
     <option value="all">All Groups</option>
@@ -856,7 +943,7 @@ function confirmDeleteGroup(id, name, qcount) {
                 data-group="g{{ q.bank_group_id }}">
               <td class="font-mono text-xs text-muted">{{ loop.index }}</td>
               <td style="min-width:160px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ q.question_text }}">{{ q.question_text }}</td>
-              <td>{% if q.question_type == 'multiple_choice' %}<span class="badge badge-blue">MC</span>{% elif q.question_type == 'fill_blank' %}<span class="badge badge-purple">FIB</span>{% else %}<span class="badge badge-orange">SA</span>{% endif %}</td>
+              <td>{% if q.question_type == 'multiple_choice' %}<span class="badge badge-blue">MC</span>{% elif q.question_type == 'true_false' %}<span class="badge badge-blue">T/F</span>{% elif q.question_type == 'fill_blank' %}<span class="badge badge-purple">FIB</span>{% elif q.question_type == 'essay' %}<span class="badge badge-gray">📝 Essay</span>{% else %}<span class="badge badge-orange">SA</span>{% endif %}</td>
               <td class="font-mono text-sm">{{ q.points }}</td>
               <td>
                 <div class="flex gap-1">
@@ -906,7 +993,7 @@ function confirmDeleteGroup(id, name, qcount) {
             data-group="ungrouped">
           <td class="font-mono text-xs text-muted">{{ loop.index }}</td>
           <td style="min-width:160px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ q.question_text }}">{{ q.question_text }}</td>
-          <td>{% if q.question_type == 'multiple_choice' %}<span class="badge badge-blue">MC</span>{% elif q.question_type == 'fill_blank' %}<span class="badge badge-purple">FIB</span>{% else %}<span class="badge badge-orange">SA</span>{% endif %}</td>
+          <td>{% if q.question_type == 'multiple_choice' %}<span class="badge badge-blue">MC</span>{% elif q.question_type == 'true_false' %}<span class="badge badge-blue">T/F</span>{% elif q.question_type == 'fill_blank' %}<span class="badge badge-purple">FIB</span>{% elif q.question_type == 'essay' %}<span class="badge badge-gray">📝 Essay</span>{% else %}<span class="badge badge-orange">SA</span>{% endif %}</td>
           <td class="font-mono text-sm">{{ q.points }}</td>
           <td>
             <div class="flex gap-1">
@@ -948,10 +1035,12 @@ function confirmDeleteGroup(id, name, qcount) {
         <textarea name="question_text" class="form-control" rows="3" required>{{ q.question_text }}</textarea>
       </div>
       <div class="form-row" style="grid-template-columns:100px 1fr">
+        {% if q.question_type != 'essay' %}
         <div class="form-group">
           <label class="form-label">Points</label>
           <input type="number" name="points" class="form-control" value="{{ q.points }}" min="1">
         </div>
+        {% endif %}
         <div class="form-group">
           <label class="form-label">Group</label>
           <select name="bank_group_id" class="form-select">
@@ -998,6 +1087,37 @@ function confirmDeleteGroup(id, name, qcount) {
           <input type="checkbox" name="case_sensitive" value="1" {% if q.case_sensitive %}checked{% endif %} />
           Case-sensitive (exact case must match, e.g. "Manila" ≠ "manila")
         </label>
+      </div>
+      {% elif q.question_type == 'true_false' %}
+      <div class="form-group">
+        <label class="form-label">Correct Answer</label>
+        <div class="flex gap-2">
+          <label class="text-sm" style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+            <input type="radio" name="correct_answer" value="True" {% if q.correct_answer == 'True' %}checked{% endif %} /> True
+          </label>
+          <label class="text-sm" style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+            <input type="radio" name="correct_answer" value="False" {% if q.correct_answer == 'False' %}checked{% endif %} /> False
+          </label>
+        </div>
+      </div>
+      {% elif q.question_type == 'essay' %}
+      <div class="form-group">
+        <label class="form-label">Rubric Criteria</label>
+        <div class="text-xs text-muted mb-1">Total points = sum of criteria below.</div>
+        <div class="rubric-rows" data-rubric-rows>
+          {% for crit in q.rubric_criteria %}
+          <div class="form-row rubric-row" style="grid-template-columns:1fr 100px 32px;gap:0.5rem;align-items:end;margin-bottom:0.4rem">
+            <div class="form-group" style="margin:0">
+              <input type="text" name="rubric_text[]" class="form-control" value="{{ crit.criterion_text }}" placeholder="e.g. Content & Ideas" />
+            </div>
+            <div class="form-group" style="margin:0">
+              <input type="number" name="rubric_points[]" class="form-control" value="{{ crit.max_points }}" min="1" placeholder="Pts" />
+            </div>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="this.closest('.rubric-row').remove()" title="Remove criterion">✕</button>
+          </div>
+          {% endfor %}
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="rubricAddRow(this)">+ Add Criterion</button>
       </div>
       {% else %}
       <div class="form-group">

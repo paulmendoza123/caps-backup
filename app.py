@@ -2539,6 +2539,15 @@ def teacher_import_from_bank(section_id):
             for c in choices:
                 conn.execute('INSERT INTO choices (question_id, choice_label, choice_text) VALUES (?,?,?)',
                              (new_qid, c['choice_label'], c['choice_text']))
+        if src['question_type'] == 'essay':
+            criteria = conn.execute(
+                'SELECT * FROM rubric_criteria WHERE question_id=? ORDER BY order_index', (qid,)
+            ).fetchall()
+            for c in criteria:
+                conn.execute('''
+                    INSERT INTO rubric_criteria (question_id, criterion_text, max_points, order_index)
+                    VALUES (?,?,?,?)
+                ''', (new_qid, c['criterion_text'], c['max_points'], c['order_index']))
         imported += 1
     conn.commit()
     msg = f'{imported} question(s) imported from bank.'
@@ -2916,7 +2925,7 @@ def teacher_bank_add_question():
     bank_group_id = request.form.get('bank_group_id') or None
     case_sensitive = 1 if request.form.get('case_sensitive') else 0
 
-    if not q_text or q_type not in ('multiple_choice', 'short_answer', 'fill_blank'):
+    if not q_text or q_type not in ('multiple_choice', 'short_answer', 'fill_blank', 'essay', 'true_false'):
         flash('Question text and type are required.', 'error')
         return redirect(url_for('teacher_question_bank'))
 
@@ -2934,6 +2943,20 @@ def teacher_bank_add_question():
         if blank_count == 0 or blank_count != answer_count:
             flash(f'Fill in the Blank questions need one "___" per answer. Found {blank_count} blank(s) but {answer_count} answer group(s).', 'error')
             return redirect(url_for('teacher_question_bank'))
+
+    if q_type == 'true_false' and correct not in ('True', 'False'):
+        flash('Please select whether True or False is the correct answer.', 'error')
+        return redirect(url_for('teacher_question_bank'))
+
+    rubric_criteria = None
+    if q_type == 'essay':
+        correct = None  # essay questions have no single "correct answer"
+        rubric_criteria = rubric_collect_criteria(request.form)
+        ok, err = rubric_validate(rubric_criteria)
+        if not ok:
+            flash(err, 'error')
+            return redirect(url_for('teacher_question_bank'))
+        points = sum(p for _, p in rubric_criteria)  # points = sum of rubric criteria
 
     if bank_group_id:
         grp = conn.execute(
@@ -2957,6 +2980,12 @@ def teacher_bank_add_question():
                 'INSERT INTO choices (question_id, choice_label, choice_text) VALUES (?,?,?)',
                 (q_id, label, ct)
             )
+    if rubric_criteria is not None:
+        for idx, (crit_text, max_pts) in enumerate(rubric_criteria):
+            conn.execute('''
+                INSERT INTO rubric_criteria (question_id, criterion_text, max_points, order_index)
+                VALUES (?,?,?,?)
+            ''', (q_id, crit_text, max_pts, idx))
     conn.commit()
     flash('Question added to bank.', 'success')
     return redirect(url_for('teacher_question_bank'))
@@ -3277,6 +3306,12 @@ def teacher_question_bank():
             qd['choices'] = [dict(c) for c in conn.execute('SELECT * FROM choices WHERE question_id=?', (q['id'],)).fetchall()]
         else:
             qd['choices'] = []
+        if q['question_type'] == 'essay':
+            qd['rubric_criteria'] = [dict(c) for c in conn.execute(
+                'SELECT * FROM rubric_criteria WHERE question_id=? ORDER BY order_index', (q['id'],)
+            ).fetchall()]
+        else:
+            qd['rubric_criteria'] = []
         questions.append(qd)
     # Get all sections grouped by exam for the "Add Question" form
     sections_raw = conn.execute('''

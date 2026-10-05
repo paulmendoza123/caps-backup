@@ -501,7 +501,9 @@
                 <div style="font-size:0.72rem;color:var(--text2);margin-top:0.1rem">
                   {{ bq.points }} pt{{ 's' if bq.points != 1 else '' }}
                   {%- if bq.question_type == 'multiple_choice' %} · MC
+                  {%- elif bq.question_type == 'true_false' %} · T/F
                   {%- elif bq.question_type == 'fill_blank' %} · FIB
+                  {%- elif bq.question_type == 'essay' %} · Essay
                   {%- else %} · SA{%- endif %}
                 </div>
               </div>
