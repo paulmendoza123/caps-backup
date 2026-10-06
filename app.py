@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, g
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, g, send_file
 import sqlite3
 import hashlib
 import os
@@ -6,10 +6,14 @@ import random
 import string
 import json
 import re
+import io
 from functools import wraps
 from datetime import datetime
 import threading
 import time
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.utils import get_column_letter
 
 app = Flask(__name__)
 app.secret_key = 'spark_secret_key_2027'
@@ -295,6 +299,16 @@ def init_db():
             FOREIGN KEY (student_id) REFERENCES users(id),
             UNIQUE(class_id, student_id)
         );
+
+        CREATE TABLE IF NOT EXISTS class_allowed_emails (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            class_id INTEGER NOT NULL,
+            email TEXT NOT NULL,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (class_id) REFERENCES classes(id),
+            UNIQUE(class_id, email)
+        );
+        CREATE INDEX IF NOT EXISTS idx_class_allowed_emails_class ON class_allowed_emails(class_id);
 
         CREATE TABLE IF NOT EXISTS exams (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1101,6 +1115,21 @@ def student_join_class():
         if not cls:
             flash('Invalid or inactive class code.', 'error')
         else:
+            # If the teacher has uploaded an allowed-emails list for this
+            # class, only students whose email is on it may join — a class
+            # with no list configured stays open to anyone with the code.
+            allowed_count = conn.execute(
+                'SELECT COUNT(*) as c FROM class_allowed_emails WHERE class_id=?', (cls['id'],)
+            ).fetchone()['c']
+            if allowed_count > 0:
+                student_email = (session.get('email') or '').strip().lower()
+                is_allowed = conn.execute(
+                    'SELECT 1 FROM class_allowed_emails WHERE class_id=? AND email=?',
+                    (cls['id'], student_email)
+                ).fetchone()
+                if not is_allowed:
+                    flash('Your email is not on this class\'s allowed list. Please check with your teacher.', 'error')
+                    return render_template('student/join_class.html')
             try:
                 conn.execute(
                     'INSERT INTO class_enrollments (class_id, student_id) VALUES (?, ?)',
@@ -1690,7 +1719,166 @@ def teacher_class_detail(class_id):
             ed['pass_count'] = 0
             ed['fail_count'] = 0
         exams.append(ed)
-    return render_template('teacher/class_detail.html', cls=cls, students=students, exams=exams)
+
+    allowed_emails = conn.execute(
+        'SELECT * FROM class_allowed_emails WHERE class_id=? ORDER BY email', (class_id,)
+    ).fetchall()
+    # Mark which allowed emails have already joined, so the teacher can see
+    # who from their list hasn't enrolled yet.
+    enrolled_emails = {s['email'].lower() for s in students}
+    allowed_emails_view = []
+    for a in allowed_emails:
+        allowed_emails_view.append({'email': a['email'], 'joined': a['email'].lower() in enrolled_emails})
+
+    return render_template('teacher/class_detail.html', cls=cls, students=students, exams=exams,
+                           allowed_emails=allowed_emails_view)
+
+def _get_owned_class(conn, class_id):
+    """Fetch a class only if it belongs to the currently logged-in teacher."""
+    return conn.execute(
+        'SELECT * FROM classes WHERE id = ? AND teacher_id = ?',
+        (class_id, session['user_id'])
+    ).fetchone()
+
+
+_EMAIL_RE = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
+
+
+@app.route('/teacher/class/<int:class_id>/allowed-emails/add', methods=['POST'])
+@role_required('teacher')
+def teacher_add_allowed_emails(class_id):
+    """Lets a teacher add one or more student emails to their class's
+    allow-list (typed/pasted directly, one per line or comma-separated).
+    Once a class has at least one allowed email, only students whose email
+    is on this list can join it with the class code."""
+    conn = get_db()
+    cls = _get_owned_class(conn, class_id)
+    if not cls:
+        flash('Class not found.', 'error')
+        return redirect(url_for('teacher_home'))
+
+    raw = request.form.get('emails', '')
+    found = sorted(set(m.lower() for m in _EMAIL_RE.findall(raw)))
+    if not found:
+        flash('No valid email addresses found. Separate multiple emails with a comma or a new line.', 'error')
+        return redirect(url_for('teacher_class_detail', class_id=class_id) + '#allowed-emails')
+
+    added = 0
+    for email in found:
+        try:
+            conn.execute('INSERT INTO class_allowed_emails (class_id, email) VALUES (?,?)', (class_id, email))
+            added += 1
+        except sqlite3.IntegrityError:
+            pass  # already on the list
+    conn.commit()
+    skipped = len(found) - added
+    msg = f'Added {added} email{"s" if added != 1 else ""} to the allowed list.'
+    if skipped:
+        msg += f' {skipped} were already on it.'
+    flash(msg, 'success' if added else 'info')
+    return redirect(url_for('teacher_class_detail', class_id=class_id) + '#allowed-emails')
+
+
+@app.route('/teacher/class/<int:class_id>/allowed-emails/import', methods=['POST'])
+@role_required('teacher')
+def teacher_import_allowed_emails(class_id):
+    """Bulk-adds allowed emails from an uploaded .txt, .csv, .docx or .xlsx
+    file — scans every line/cell/paragraph for anything that looks like an
+    email address, so it works with whatever list format the teacher
+    already has on hand (e.g. a class list exported from the registrar)."""
+    conn = get_db()
+    cls = _get_owned_class(conn, class_id)
+    if not cls:
+        flash('Class not found.', 'error')
+        return redirect(url_for('teacher_home'))
+
+    uploaded = request.files.get('emails_file')
+    if not uploaded or uploaded.filename == '':
+        flash('No file selected.', 'error')
+        return redirect(url_for('teacher_class_detail', class_id=class_id) + '#allowed-emails')
+
+    raw_name = uploaded.filename
+    ext = raw_name.rsplit('.', 1)[-1].lower() if '.' in raw_name else ''
+    if ext not in ('txt', 'csv', 'docx', 'xlsx'):
+        flash('Unsupported file type. Please upload a .txt, .csv, .docx, or .xlsx file.', 'error')
+        return redirect(url_for('teacher_class_detail', class_id=class_id) + '#allowed-emails')
+
+    text_blob = ''
+    try:
+        if ext in ('txt', 'csv'):
+            text_blob = uploaded.read().decode('utf-8', errors='replace')
+        elif ext == 'docx':
+            import docx
+            document = docx.Document(uploaded)
+            text_blob = '\n'.join(p.text for p in document.paragraphs)
+            for table in document.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        text_blob += '\n' + cell.text
+        elif ext == 'xlsx':
+            wb = load_workbook(uploaded, data_only=True, read_only=True)
+            parts = []
+            for ws in wb.worksheets:
+                for row in ws.iter_rows(values_only=True):
+                    for val in row:
+                        if val:
+                            parts.append(str(val))
+            text_blob = '\n'.join(parts)
+    except Exception:
+        flash('Could not read that file. Make sure it is a valid, uncorrupted file of that type.', 'error')
+        return redirect(url_for('teacher_class_detail', class_id=class_id) + '#allowed-emails')
+
+    found = sorted(set(m.lower() for m in _EMAIL_RE.findall(text_blob)))
+    if not found:
+        flash('No email addresses were found in that file.', 'error')
+        return redirect(url_for('teacher_class_detail', class_id=class_id) + '#allowed-emails')
+
+    added = 0
+    for email in found:
+        try:
+            conn.execute('INSERT INTO class_allowed_emails (class_id, email) VALUES (?,?)', (class_id, email))
+            added += 1
+        except sqlite3.IntegrityError:
+            pass
+    conn.commit()
+    skipped = len(found) - added
+    msg = f'Found {len(found)} email{"s" if len(found) != 1 else ""} in the file — added {added} new.'
+    if skipped:
+        msg += f' {skipped} were already on the list.'
+    flash(msg, 'success' if added else 'info')
+    return redirect(url_for('teacher_class_detail', class_id=class_id) + '#allowed-emails')
+
+
+@app.route('/teacher/class/<int:class_id>/allowed-emails/remove', methods=['POST'])
+@role_required('teacher')
+def teacher_remove_allowed_email(class_id):
+    conn = get_db()
+    cls = _get_owned_class(conn, class_id)
+    if not cls:
+        flash('Class not found.', 'error')
+        return redirect(url_for('teacher_home'))
+    email = request.form.get('email', '').strip().lower()
+    conn.execute('DELETE FROM class_allowed_emails WHERE class_id=? AND email=?', (class_id, email))
+    conn.commit()
+    flash(f'Removed {email} from the allowed list.', 'success')
+    return redirect(url_for('teacher_class_detail', class_id=class_id) + '#allowed-emails')
+
+
+@app.route('/teacher/class/<int:class_id>/allowed-emails/clear', methods=['POST'])
+@role_required('teacher')
+def teacher_clear_allowed_emails(class_id):
+    """Clears the whole allow-list, which re-opens the class so ANY student
+    with the class code can join (the original, unrestricted behavior)."""
+    conn = get_db()
+    cls = _get_owned_class(conn, class_id)
+    if not cls:
+        flash('Class not found.', 'error')
+        return redirect(url_for('teacher_home'))
+    conn.execute('DELETE FROM class_allowed_emails WHERE class_id=?', (class_id,))
+    conn.commit()
+    flash('Cleared the allowed-emails list. This class is now open to anyone with the class code.', 'success')
+    return redirect(url_for('teacher_class_detail', class_id=class_id) + '#allowed-emails')
+
 
 @app.route('/teacher/class/<int:class_id>/delete', methods=['POST'])
 @role_required('teacher')
@@ -2172,6 +2360,57 @@ def teacher_view_student_result(exam_id, student_id):
     return render_template('teacher/student_exam_result.html', exam=exam, student=student,
                            exam_session=exam_sess, questions=questions)
 
+def apply_essay_grade(conn, answer_id, criteria, criterion_scores, feedback, teacher_id):
+    """Saves rubric scores + feedback for ONE essay answer.
+
+    `criteria` is the list of rubric_criteria rows for the question.
+    `criterion_scores` is a dict {criterion_id: raw_score} (raw_score may be
+    a string, float, int, or missing/invalid -> treated as 0).
+    Returns the clamped total score that was saved.
+    """
+    total = 0.0
+    for crit in criteria:
+        raw = criterion_scores.get(crit['id'], 0)
+        try:
+            given = float(raw)
+        except (TypeError, ValueError):
+            given = 0.0
+        given = max(0.0, min(given, crit['max_points']))  # clamp to the criterion's range
+        total += given
+        conn.execute('''
+            INSERT INTO rubric_scores (answer_id, criterion_id, score) VALUES (?,?,?)
+            ON CONFLICT(answer_id, criterion_id) DO UPDATE SET score=excluded.score
+        ''', (answer_id, crit['id'], given))
+
+    conn.execute('''
+        UPDATE answers SET manual_score=?, feedback=?, graded_by=?, graded_at=CURRENT_TIMESTAMP
+        WHERE id=?
+    ''', (total, feedback, teacher_id, answer_id))
+    return total
+
+
+def recompute_session_score(conn, exam_id, session_id):
+    """Recomputes one exam session's total score from scratch across every
+    question in the exam, and updates whether it still has essay answers
+    waiting to be graded (needs_grading). Returns (new_score, still_pending)."""
+    all_qs = conn.execute('SELECT * FROM questions WHERE exam_id=?', (exam_id,)).fetchall()
+    new_score = 0.0
+    still_pending = False
+    for aq in all_qs:
+        aq_ans = conn.execute(
+            'SELECT * FROM answers WHERE session_id=? AND question_id=?', (session_id, aq['id'])
+        ).fetchone()
+        a_text = aq_ans['answer_text'] if aq_ans else ''
+        a_manual = aq_ans['manual_score'] if aq_ans else None
+        new_score += aq['points'] * question_credit(aq, a_text, a_manual)
+        if aq['question_type'] == 'essay' and a_manual is None:
+            still_pending = True
+
+    conn.execute('UPDATE exam_sessions SET score=?, needs_grading=? WHERE id=?',
+                 (new_score, 1 if still_pending else 0, session_id))
+    return new_score, still_pending
+
+
 @app.route('/teacher/exam/<int:exam_id>/student/<int:student_id>/grade-essay/<int:question_id>', methods=['POST'])
 @role_required('teacher')
 def teacher_grade_essay(exam_id, student_id, question_id):
@@ -2207,48 +2446,265 @@ def teacher_grade_essay(exam_id, student_id, question_id):
 
     criteria = conn.execute('SELECT * FROM rubric_criteria WHERE question_id=?', (question_id,)).fetchall()
     feedback = request.form.get('feedback', '').strip()
-    total = 0.0
-    for crit in criteria:
-        raw = request.form.get(f'rubric_score_{crit["id"]}', '0').strip()
-        try:
-            given = float(raw)
-        except ValueError:
-            given = 0.0
-        given = max(0.0, min(given, crit['max_points']))  # clamp to the criterion's range
-        total += given
-        conn.execute('''
-            INSERT INTO rubric_scores (answer_id, criterion_id, score) VALUES (?,?,?)
-            ON CONFLICT(answer_id, criterion_id) DO UPDATE SET score=excluded.score
-        ''', (ans['id'], crit['id'], given))
+    criterion_scores = {crit['id']: request.form.get(f'rubric_score_{crit["id"]}', '0').strip() for crit in criteria}
 
-    conn.execute('''
-        UPDATE answers SET manual_score=?, feedback=?, graded_by=?, graded_at=CURRENT_TIMESTAMP
-        WHERE id=?
-    ''', (total, feedback, session['user_id'], ans['id']))
+    apply_essay_grade(conn, ans['id'], criteria, criterion_scores, feedback, session['user_id'])
     conn.commit()
 
     # Recompute this student's overall score now that one more essay is graded,
     # and check whether any OTHER essay answers in this submission are still
     # waiting to be graded.
-    all_qs = conn.execute('SELECT * FROM questions WHERE exam_id=?', (exam_id,)).fetchall()
-    new_score = 0.0
-    still_pending = False
-    for aq in all_qs:
-        aq_ans = conn.execute(
-            'SELECT * FROM answers WHERE session_id=? AND question_id=?', (exam_sess['id'], aq['id'])
-        ).fetchone()
-        a_text = aq_ans['answer_text'] if aq_ans else ''
-        a_manual = aq_ans['manual_score'] if aq_ans else None
-        new_score += aq['points'] * question_credit(aq, a_text, a_manual)
-        if aq['question_type'] == 'essay' and a_manual is None:
-            still_pending = True
-
-    conn.execute('UPDATE exam_sessions SET score=?, needs_grading=? WHERE id=?',
-                 (new_score, 1 if still_pending else 0, exam_sess['id']))
+    recompute_session_score(conn, exam_id, exam_sess['id'])
     conn.commit()
 
     flash('Grade saved.', 'success')
     return redirect(url_for('teacher_view_student_result', exam_id=exam_id, student_id=student_id) + f'#q-{question_id}')
+
+
+def _safe_sheet_title(base, used_titles):
+    """Excel sheet titles must be <=31 chars and unique within the workbook."""
+    base = re.sub(r'[\\/*\[\]:?]', ' ', base).strip() or 'Question'
+    title = base[:31]
+    n = 2
+    while title in used_titles:
+        suffix = f' ({n})'
+        title = base[:31 - len(suffix)] + suffix
+        n += 1
+    used_titles.add(title)
+    return title
+
+
+@app.route('/teacher/exam/<int:exam_id>/essays/export')
+@role_required('teacher')
+def teacher_export_essays(exam_id):
+    """Exports every essay question's student answers to an .xlsx workbook —
+    one sheet per essay question — with blank/editable rubric-score columns
+    and a Feedback column, so a teacher can grade fully offline (no need to
+    stay connected to the Raspberry Pi) and re-upload it afterward."""
+    conn = get_db()
+    exam = conn.execute('''
+        SELECT e.*, c.teacher_id, c.subject_name, c.block_name FROM exams e JOIN classes c ON e.class_id = c.id WHERE e.id=?
+    ''', (exam_id,)).fetchone()
+    if not exam or int(exam['teacher_id']) != int(session['user_id']):
+        flash('Exam not found.', 'error')
+        return redirect(url_for('teacher_home'))
+
+    essay_questions = conn.execute('''
+        SELECT q.*, s.title as section_title FROM questions q
+        LEFT JOIN sections s ON q.section_id = s.id
+        WHERE q.exam_id=? AND q.question_type='essay'
+        ORDER BY s.order_index, q.order_index
+    ''', (exam_id,)).fetchall()
+
+    if not essay_questions:
+        flash('This exam has no essay questions to export.', 'error')
+        return redirect(url_for('teacher_exam_results', exam_id=exam_id))
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    used_titles = set()
+
+    info_ws = wb.create_sheet('Instructions')
+    used_titles.add('Instructions')
+    info_lines = [
+        ['SPARK — Essay Grading Export'],
+        [f'Exam: {exam["title"]}'],
+        [f'Class: {exam["subject_name"]} · {exam["block_name"]}'],
+        [''],
+        ['How to use this file:'],
+        ['1. Each essay question has its own sheet (tab at the bottom).'],
+        ['2. Fill in a score for each rubric criterion column (do not exceed the "max" shown in the header).'],
+        ['3. You may also fill in the Feedback column — this will show to the student.'],
+        ['4. Do NOT edit or delete the "AnswerID" column — it is used to match each row back to the right student.'],
+        ['5. Do NOT rename the sheet tabs or add/remove columns.'],
+        ['6. Save the file, then upload it back on the "Import Graded Essays" button on the exam results page.'],
+        ['7. Rows left blank for a criterion will be scored as 0 for that criterion.'],
+    ]
+    for line in info_lines:
+        info_ws.append(line)
+    info_ws.column_dimensions['A'].width = 90
+    info_ws['A1'].font = Font(bold=True, size=14)
+
+    header_font = Font(bold=True, color='FFFFFF')
+    header_fill = PatternFill('solid', fgColor='4472C4')
+
+    for q in essay_questions:
+        criteria = conn.execute(
+            'SELECT * FROM rubric_criteria WHERE question_id=? ORDER BY order_index', (q['id'],)
+        ).fetchall()
+
+        label = q['question_text'][:25].strip() or f'Q{q["id"]}'
+        title = _safe_sheet_title(f'Q{q["order_index"] + 1 if q["order_index"] is not None else q["id"]} {label}', used_titles)
+        ws = wb.create_sheet(title)
+
+        headers = ['AnswerID (do not edit)', 'Student Name', 'Student Answer']
+        for crit in criteria:
+            headers.append(f'Score [C{crit["id"]}]: {crit["criterion_text"]} (max {crit["max_points"]:g})')
+        headers += ['Feedback', 'Status']
+        ws.append(headers)
+        for col_idx, _ in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(wrap_text=True, vertical='center')
+        ws.freeze_panes = 'D2'
+        ws.column_dimensions['A'].hidden = True
+        ws.column_dimensions['A'].width = 12
+        ws.column_dimensions['B'].width = 22
+        ws.column_dimensions['C'].width = 60
+        for i, crit in enumerate(criteria):
+            ws.column_dimensions[get_column_letter(4 + i)].width = 22
+        ws.column_dimensions[get_column_letter(4 + len(criteria))].width = 40
+        ws.column_dimensions[get_column_letter(5 + len(criteria))].width = 12
+
+        rows = conn.execute('''
+            SELECT a.id as answer_id, a.answer_text, a.manual_score, a.feedback
+            FROM answers a
+            JOIN exam_sessions es ON a.session_id = es.id
+            JOIN users u ON es.student_id = u.id
+            WHERE a.question_id=? AND es.status='submitted'
+            ORDER BY u.full_name
+        ''', (q['id'],)).fetchall()
+        # Join student name separately (SQLite column name collision safety)
+        names = conn.execute('''
+            SELECT a.id as answer_id, u.full_name
+            FROM answers a JOIN exam_sessions es ON a.session_id = es.id JOIN users u ON es.student_id = u.id
+            WHERE a.question_id=? AND es.status='submitted'
+        ''', (q['id'],)).fetchall()
+        name_by_answer = {r['answer_id']: r['full_name'] for r in names}
+
+        for r in rows:
+            existing_scores = {
+                sc['criterion_id']: sc['score'] for sc in
+                conn.execute('SELECT criterion_id, score FROM rubric_scores WHERE answer_id=?', (r['answer_id'],)).fetchall()
+            }
+            row_vals = [r['answer_id'], name_by_answer.get(r['answer_id'], ''), r['answer_text'] or '']
+            for crit in criteria:
+                row_vals.append(existing_scores.get(crit['id'], ''))
+            row_vals.append(r['feedback'] or '')
+            row_vals.append('Graded' if r['manual_score'] is not None else 'Pending')
+            ws.append(row_vals)
+            ws.cell(row=ws.max_row, column=3).alignment = Alignment(wrap_text=True, vertical='top')
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    safe_title = re.sub(r'[^A-Za-z0-9_-]+', '_', exam['title'])[:40] or 'exam'
+    filename = f'essays_{safe_title}_{exam_id}.xlsx'
+    return send_file(buf, as_attachment=True, download_name=filename,
+                      mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
+@app.route('/teacher/exam/<int:exam_id>/essays/import', methods=['POST'])
+@role_required('teacher')
+def teacher_import_essays(exam_id):
+    """Accepts a filled-in essay export back, applies every rubric score and
+    feedback it contains, then recomputes the affected students' scores."""
+    conn = get_db()
+    exam = conn.execute('''
+        SELECT e.*, c.teacher_id FROM exams e JOIN classes c ON e.class_id = c.id WHERE e.id=?
+    ''', (exam_id,)).fetchone()
+    if not exam or int(exam['teacher_id']) != int(session['user_id']):
+        flash('Exam not found.', 'error')
+        return redirect(url_for('teacher_home'))
+
+    file = request.files.get('essay_file')
+    if not file or not file.filename:
+        flash('Please choose the filled-in Excel file to upload.', 'error')
+        return redirect(url_for('teacher_exam_results', exam_id=exam_id))
+    if not file.filename.lower().endswith('.xlsx'):
+        flash('Please upload the .xlsx file exported from this exam — other formats are not supported.', 'error')
+        return redirect(url_for('teacher_exam_results', exam_id=exam_id))
+
+    try:
+        wb = load_workbook(file, data_only=True)
+    except Exception:
+        flash('Could not read that file. Make sure it is the unmodified .xlsx file exported from this exam.', 'error')
+        return redirect(url_for('teacher_exam_results', exam_id=exam_id))
+
+    exam_essay_question_ids = {
+        row['id'] for row in conn.execute(
+            "SELECT id FROM questions WHERE exam_id=? AND question_type='essay'", (exam_id,)
+        ).fetchall()
+    }
+
+    graded_count = 0
+    affected_sessions = set()
+    skipped = []
+
+    for ws in wb.worksheets:
+        if ws.title.strip().lower() == 'instructions':
+            continue
+        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if not header_row:
+            continue
+
+        col_answer_id = None
+        col_feedback = None
+        col_criterion = {}
+        for idx, h in enumerate(header_row):
+            if not h:
+                continue
+            h = str(h)
+            if h.startswith('AnswerID'):
+                col_answer_id = idx
+            elif h.strip().lower() == 'feedback':
+                col_feedback = idx
+            else:
+                m = re.search(r'\[C(\d+)\]', h)
+                if m:
+                    col_criterion[idx] = int(m.group(1))
+
+        if col_answer_id is None:
+            skipped.append(f'Sheet "{ws.title}": missing the AnswerID column, skipped.')
+            continue
+
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if col_answer_id >= len(row) or row[col_answer_id] in (None, ''):
+                continue
+            try:
+                answer_id = int(row[col_answer_id])
+            except (TypeError, ValueError):
+                skipped.append(f'Sheet "{ws.title}": a row had an invalid AnswerID, skipped.')
+                continue
+
+            ans = conn.execute('SELECT * FROM answers WHERE id=?', (answer_id,)).fetchone()
+            if not ans or ans['question_id'] not in exam_essay_question_ids:
+                skipped.append(f'Sheet "{ws.title}": AnswerID {answer_id} does not belong to this exam, skipped.')
+                continue
+
+            criteria = conn.execute(
+                'SELECT * FROM rubric_criteria WHERE question_id=?', (ans['question_id'],)
+            ).fetchall()
+            criterion_scores = {}
+            for idx, crit_id in col_criterion.items():
+                if idx < len(row) and row[idx] not in (None, ''):
+                    criterion_scores[crit_id] = row[idx]
+            feedback = ''
+            if col_feedback is not None and col_feedback < len(row) and row[col_feedback]:
+                feedback = str(row[col_feedback]).strip()
+
+            apply_essay_grade(conn, answer_id, criteria, criterion_scores, feedback, session['user_id'])
+            graded_count += 1
+            affected_sessions.add(ans['session_id'])
+
+    conn.commit()
+
+    for sid in affected_sessions:
+        recompute_session_score(conn, exam_id, sid)
+    conn.commit()
+
+    if graded_count:
+        flash(f'Imported grades for {graded_count} essay answer(s) across {len(affected_sessions)} student submission(s).', 'success')
+    else:
+        flash('No gradable rows were found in that file.', 'error')
+    for s in skipped[:8]:
+        flash(s, 'error')
+    if len(skipped) > 8:
+        flash(f'...and {len(skipped) - 8} more row(s) skipped.', 'error')
+
+    return redirect(url_for('teacher_exam_results', exam_id=exam_id))
+
 
 @app.route('/teacher/exam/<int:exam_id>/toggle-status', methods=['POST'])
 @role_required('teacher')
@@ -3048,6 +3504,19 @@ def teacher_bank_import_file():
     #   1. The ___ is the powerhouse of the cell, and water is H2O and ___.
     #   Answer: mitochondria/mitochondrion | oxygen/O2
     #
+    # True/False:
+    #   1. The sky is blue.
+    #   Answer: True
+    #
+    # Essay (always needs a "Rubric:" section — essay questions are always
+    # manually graded against a rubric, never auto-graded, so there is no
+    # "Answer:" line; points are the sum of the rubric's max points):
+    #   1. Explain the water cycle in your own words.
+    #   Rubric:
+    #   - Clarity: 5
+    #   - Accuracy: 5
+    #   - Completeness: 5
+    #
     # Any question type may wrap a code sample in a fenced block — use
     # ``` ... ``` or ''' ... ''' (either marker; they don't have to match on
     # both ends). Indentation inside the fence is preserved, and on the
@@ -3069,8 +3538,13 @@ def teacher_bank_import_file():
     # so indentation inside a fenced ``` or ''' code block survives.
     lines = [l.rstrip('\r\n') for l in content.splitlines()]
 
-    _HEADER_RE = _re.compile(r'^(multiple\s*choice|short\s*answer|fill\s*in\s*the\s*blank)\s*:?\s*$', _re.IGNORECASE)
+    _HEADER_RE = _re.compile(
+        r'^(multiple\s*choice|short\s*answer|fill\s*in\s*the\s*blank|true\s*/?\s*false|essay)\s*:?\s*$',
+        _re.IGNORECASE
+    )
     _FENCE_RE = _re.compile(r"^(```|''')")
+    _RUBRIC_HEADER_RE = _re.compile(r'^rubric\s*:?\s*$', _re.IGNORECASE)
+    _RUBRIC_ITEM_RE = _re.compile(r'^-?\s*(.+?)\s*:\s*(\d+(?:\.\d+)?)\s*(?:pts?|points?)?\s*$', _re.IGNORECASE)
 
     # Drop section header lines (e.g. "Multiple Choice:", "Short Answer:",
     # "Fill in the Blank:") so they don't get mistaken for a stray question
@@ -3115,6 +3589,7 @@ def teacher_bank_import_file():
     parsed = []
     skipped_no_answer = 0
     skipped_blank_mismatch = 0
+    skipped_essay_no_rubric = 0
     for block in blocks:
         if not block:
             continue
@@ -3126,6 +3601,8 @@ def teacher_bank_import_file():
 
         choices = {}
         answer_raw = ''
+        rubric_items = []  # [(criterion_text, max_points), ...] — essay only
+        in_rubric = False
         # Everything up to the first choice line becomes part of the question
         # text (joined with real newlines), so a ``` fenced code block right
         # after the question prompt is kept intact — indentation and all.
@@ -3138,6 +3615,24 @@ def teacher_bank_import_file():
                 continue  # don't keep the ``` markers themselves
             if in_fence:
                 question_lines.append(bline)  # preserve original indentation
+                continue
+            if _RUBRIC_HEADER_RE.match(stripped_b):
+                in_rubric = True
+                continue  # the "Rubric:" header line itself isn't kept
+            if in_rubric:
+                # Once a "Rubric:" header is seen, every remaining line in
+                # this block is treated as a rubric item (or ignored if it
+                # doesn't match "- Criterion: points") — a rubric section is
+                # expected to be the last thing in a question block.
+                r_match = _RUBRIC_ITEM_RE.match(stripped_b)
+                if r_match:
+                    crit_text = r_match.group(1).strip()
+                    try:
+                        max_pts = float(r_match.group(2))
+                    except ValueError:
+                        continue
+                    if crit_text and max_pts > 0:
+                        rubric_items.append((crit_text, max_pts))
                 continue
             c_match = _re.match(r'^([a-zA-Z])[\.\)]\s+(.+)', stripped_b)
             a_match = _re.match(r'^[Aa]nswer\s*:\s*(.+)', stripped_b)
@@ -3153,7 +3648,24 @@ def teacher_bank_import_file():
         if not q_text:
             continue
 
-        if choices:
+        if in_rubric and not rubric_items:
+            # Had a "Rubric:" header but no valid "- Criterion: points" lines
+            # under it. Essay questions must always have a rubric, so skip
+            # rather than import an ungradeable essay.
+            skipped_essay_no_rubric += 1
+            continue
+
+        if rubric_items:
+            # A "Rubric:" section was found — this is always an Essay
+            # question (mandatory rubric, manually graded, no single
+            # correct answer), regardless of anything in choices/answer_raw.
+            parsed.append({
+                'type': 'essay',
+                'text': q_text,
+                'rubric': rubric_items,
+                'points': sum(pts for _, pts in rubric_items),
+            })
+        elif choices:
             # A multiple-choice question with no "Answer:" line has no way to
             # know the correct choice. Previously this silently defaulted to
             # "A", which could ship a wrong answer key with no indication
@@ -3190,6 +3702,18 @@ def teacher_bank_import_file():
                 'answer': answer_raw,
                 'points': blank_count,
             })
+        elif answer_raw.strip().lower() in ('true', 'false'):
+            # True/False: inferred when the answer is literally "True" or
+            # "False" and the question has no choices/blanks/rubric. (If a
+            # short-answer question's expected text genuinely is the word
+            # "true"/"false", it will import as True/False instead — this is
+            # intentional since the two behave identically for the student
+            # either way, and True/False is almost always what's meant.)
+            parsed.append({
+                'type': 'true_false',
+                'text': q_text,
+                'answer': 'True' if answer_raw.strip().lower() == 'true' else 'False',
+            })
         else:
             parsed.append({
                 'type': 'short_answer',
@@ -3198,11 +3722,13 @@ def teacher_bank_import_file():
             })
 
     if not parsed:
-        if skipped_no_answer or skipped_blank_mismatch:
+        total_skipped = skipped_no_answer + skipped_blank_mismatch + skipped_essay_no_rubric
+        if total_skipped:
             flash(
-                f'No questions could be imported: {skipped_no_answer + skipped_blank_mismatch} '
-                f'question(s) were skipped because they were missing a valid "Answer:" line '
-                f'or had a blank/answer count mismatch. Please check the file and try again.',
+                f'No questions could be imported: {total_skipped} '
+                f'question(s) were skipped because they were missing a valid "Answer:" line, '
+                f'had a blank/answer count mismatch, or an essay "Rubric:" section with no valid '
+                f'criteria. Please check the file and try again.',
                 'error'
             )
         else:
@@ -3245,7 +3771,7 @@ def teacher_bank_import_file():
                (exam_id, section_id, question_text, question_type, points, correct_answer,
                 order_index, bank_group_id, is_bank_only, teacher_id)
                VALUES (NULL, NULL, ?, ?, ?, ?, 0, ?, 1, ?)''',
-            (q['text'], q['type'], points, q['answer'], group_id, session['user_id'])
+            (q['text'], q['type'], points, q.get('answer'), group_id, session['user_id'])
         )
         q_id = cur.lastrowid
         if q['type'] == 'multiple_choice':
@@ -3255,18 +3781,28 @@ def teacher_bank_import_file():
                     'INSERT INTO choices (question_id, choice_label, choice_text) VALUES (?,?,?)',
                     (q_id, lbl, txt)
                 )
+        elif q['type'] == 'essay':
+            for idx, (crit_text, max_pts) in enumerate(q.get('rubric', [])):
+                conn.execute('''
+                    INSERT INTO rubric_criteria (question_id, criterion_text, max_points, order_index)
+                    VALUES (?,?,?,?)
+                ''', (q_id, crit_text, max_pts, idx))
         added += 1
 
     conn.commit()
     msg = f'Imported {added} question{"s" if added != 1 else ""} into group "{group_name}".'
     if duplicates:
         msg += f' Skipped {duplicates} already in this group (same question text).'
-    skipped_total = skipped_no_answer + skipped_blank_mismatch
+    skipped_total = skipped_no_answer + skipped_blank_mismatch + skipped_essay_no_rubric
     if skipped_total:
+        parts = []
+        if skipped_no_answer or skipped_blank_mismatch:
+            parts.append('missing a valid "Answer:" line or had a blank/answer mismatch')
+        if skipped_essay_no_rubric:
+            parts.append('had a "Rubric:" section with no valid criteria')
         msg += (
             f' Skipped {skipped_total} question{"s" if skipped_total != 1 else ""} '
-            f'that were missing a valid "Answer:" line or had a blank/answer mismatch — '
-            f'please review the source file.'
+            f'that {" / ".join(parts)} — please review the source file.'
         )
         flash(msg, 'info')
     else:

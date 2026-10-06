@@ -7,12 +7,37 @@
     <div class="page-subtitle">{{ exam.subject_name }} · {{ exam.block_name }}</div>
   </div>
   <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+    {% set has_essays = question_stats | selectattr('question_type', 'eq', 'essay') | list %}
+    {% if has_essays %}
+    <a href="{{ url_for('teacher_export_essays', exam_id=exam.id) }}" class="btn btn-ghost" style="font-size:0.85rem">⬇️ Export Essays for Grading</a>
+    <button type="button" onclick="document.getElementById('importEssaysModal').style.display='flex'" class="btn btn-ghost" style="font-size:0.85rem">⬆️ Import Graded Essays</button>
+    {% endif %}
     {% if results %}
     <button onclick="generateReport()" class="btn btn-primary" style="font-size:0.85rem">📄 Generate Report</button>
     {% endif %}
     <a href="{{ url_for('teacher_class_detail', class_id=exam.class_id) }}" class="btn btn-ghost">← Back to Class</a>
   </div>
 </div>
+
+{% set has_essays = question_stats | selectattr('question_type', 'eq', 'essay') | list %}
+{% if has_essays %}
+<div id="importEssaysModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:999;align-items:center;justify-content:center">
+  <div class="card" style="max-width:480px;width:90%;padding:1.5rem">
+    <div class="fw-600" style="font-size:1.05rem;margin-bottom:0.5rem">⬆️ Import Graded Essays</div>
+    <p class="text-muted" style="font-size:0.85rem;margin-bottom:1rem">
+      Upload the same .xlsx file you exported, after filling in rubric scores and feedback offline.
+      This will apply every score in the file and recompute affected students' totals — no need to stay connected to the Raspberry Pi.
+    </p>
+    <form method="POST" action="{{ url_for('teacher_import_essays', exam_id=exam.id) }}" enctype="multipart/form-data">
+      <input type="file" name="essay_file" accept=".xlsx" required style="margin-bottom:1rem;width:100%">
+      <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+        <button type="button" onclick="document.getElementById('importEssaysModal').style.display='none'" class="btn btn-ghost">Cancel</button>
+        <button type="submit" class="btn btn-primary">Upload &amp; Apply Grades</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
 
 {% if results %}
 {% set submitted = results | selectattr('status', 'eq', 'submitted') | list %}

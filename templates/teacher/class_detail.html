@@ -18,6 +18,7 @@
 <div class="tabs">
   <button class="tab-btn active" data-tab="exams">📝 Exams</button>
   <button class="tab-btn" data-tab="students">👥 Students ({{ students|length }})</button>
+  <button class="tab-btn" data-tab="allowed-emails">🔒 Allowed Emails ({{ allowed_emails|length }})</button>
 </div>
 
 <!-- EXAMS TAB -->
@@ -90,6 +91,73 @@
     <div class="empty-state-icon">👥</div>
     <div class="empty-state-title">No students enrolled yet</div>
     <div class="empty-state-text">Share the class code <span class="font-mono text-accent">{{ cls.class_code }}</span> with your students.</div>
+  </div>
+  {% endif %}
+</div>
+
+<!-- ALLOWED EMAILS TAB -->
+<div class="tab-content" data-tab="allowed-emails" id="allowed-emails">
+  <div class="card mb-2" style="padding:1.25rem">
+    <div class="fw-600" style="margin-bottom:0.35rem">🔒 Who can join with the class code?</div>
+    {% if allowed_emails %}
+    <div class="text-muted" style="font-size:0.85rem;margin-bottom:1rem">
+      Only the <strong>{{ allowed_emails|length }}</strong> email{{ 's' if allowed_emails|length != 1 else '' }} listed below can join this class using
+      <span class="font-mono text-accent">{{ cls.class_code }}</span>. Anyone else will be blocked at sign-up.
+    </div>
+    {% else %}
+    <div class="text-muted" style="font-size:0.85rem;margin-bottom:1rem">
+      No list set yet — <strong>anyone</strong> with the class code <span class="font-mono text-accent">{{ cls.class_code }}</span> can join right now.
+      Add emails below to restrict joining to only your students.
+    </div>
+    {% endif %}
+
+    <div style="display:flex;gap:1rem;flex-wrap:wrap">
+      <form method="POST" action="{{ url_for('teacher_add_allowed_emails', class_id=cls.id) }}" style="flex:1;min-width:260px">
+        <label class="form-label" style="font-size:0.8rem">Add emails manually</label>
+        <textarea name="emails" class="form-control" rows="3" placeholder="juan@psu.palawan.edu.ph, maria@psu.palawan.edu.ph&#10;(comma or new line separated)" style="font-size:0.85rem"></textarea>
+        <button type="submit" class="btn btn-primary btn-sm" style="margin-top:0.5rem">➕ Add to List</button>
+      </form>
+
+      <form method="POST" action="{{ url_for('teacher_import_allowed_emails', class_id=cls.id) }}" enctype="multipart/form-data" style="flex:1;min-width:260px">
+        <label class="form-label" style="font-size:0.8rem">Or upload a file (.txt, .csv, .docx, .xlsx)</label>
+        <input type="file" name="emails_file" accept=".txt,.csv,.docx,.xlsx" class="form-control" style="font-size:0.85rem;padding:0.4rem 0.6rem">
+        <div class="text-muted" style="font-size:0.72rem;margin-top:0.3rem">Any email-looking text in the file is picked up automatically — no special format needed.</div>
+        <button type="submit" class="btn btn-ghost btn-sm" style="margin-top:0.5rem">⬆️ Import File</button>
+      </form>
+    </div>
+  </div>
+
+  {% if allowed_emails %}
+  <div class="card" style="padding:0;overflow:visible">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Email</th><th>Status</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+          {% for a in allowed_emails %}
+          <tr>
+            <td class="font-mono text-sm">{{ a.email }}</td>
+            <td>
+              {% if a.joined %}<span class="badge badge-green">✓ Joined</span>
+              {% else %}<span class="badge badge-gray">Not yet joined</span>{% endif %}
+            </td>
+            <td>
+              <form method="POST" action="{{ url_for('teacher_remove_allowed_email', class_id=cls.id) }}" style="display:inline" onsubmit="return confirm('Remove {{ a.email }} from the allowed list?')">
+                <input type="hidden" name="email" value="{{ a.email }}">
+                <button type="submit" class="btn btn-ghost btn-sm" style="color:#e74c3c">✕ Remove</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div style="margin-top:1rem">
+    <form method="POST" action="{{ url_for('teacher_clear_allowed_emails', class_id=cls.id) }}" onsubmit="return confirm('This removes the whole list. The class will become open — ANY student with the class code will be able to join. Continue?')">
+      <button type="submit" class="btn btn-ghost btn-sm" style="color:#e74c3c">🗑 Clear Entire List (reopen class to anyone)</button>
+    </form>
   </div>
   {% endif %}
 </div>

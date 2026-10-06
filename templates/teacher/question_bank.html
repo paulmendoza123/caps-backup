@@ -314,6 +314,27 @@
             <div>Answer: 3</div>
           </div>
 
+          {# ── True / False ── #}
+          <div class="import-format-panel" data-format-panel="tf" style="display:none">
+            <div style="color:var(--text3);font-weight:700;margin-bottom:0.35rem;font-family:inherit">Plain question:</div>
+            <div>1. The sky is blue.</div>
+            <div>Answer: True</div>
+            <div style="margin:0.6rem 0;border-top:1px dashed var(--border)"></div>
+            <div>2. Python is a compiled language.</div>
+            <div>Answer: False</div>
+          </div>
+
+          {# ── Essay ── #}
+          <div class="import-format-panel" data-format-panel="essay" style="display:none">
+            <div style="color:var(--text3);font-weight:700;margin-bottom:0.35rem;font-family:inherit">Plain question (always needs a Rubric):</div>
+            <div>1. Explain the water cycle in your own words.</div>
+            <div>Rubric:</div>
+            <div>- Clarity: 5</div>
+            <div>- Accuracy: 5</div>
+            <div>- Completeness: 5</div>
+            <div style="color:var(--text3);margin-top:0.35rem">No "Answer:" line — essays are always manually graded. Points = sum of the rubric (here, 15).</div>
+          </div>
+
         </div>
 
         {# Type selector buttons, stacked vertically on the right #}
@@ -324,12 +345,19 @@
                   onclick="showImportFormat('sa')" style="justify-content:flex-start">Short Answer</button>
           <button type="button" class="btn btn-ghost btn-sm import-format-tab" data-format-tab="fib"
                   onclick="showImportFormat('fib')" style="justify-content:flex-start">Fill in the Blank</button>
+          <button type="button" class="btn btn-ghost btn-sm import-format-tab" data-format-tab="tf"
+                  onclick="showImportFormat('tf')" style="justify-content:flex-start">True / False</button>
+          <button type="button" class="btn btn-ghost btn-sm import-format-tab" data-format-tab="essay"
+                  onclick="showImportFormat('essay')" style="justify-content:flex-start">Essay</button>
 
           <div style="font-size:0.72rem;color:var(--text3);margin-top:0.5rem;line-height:1.5">
             ℹ️ The group name will be taken from the filename automatically (e.g. <em>Chapter3.docx</em> → <strong>Chapter3</strong>).
           </div>
           <div style="font-size:0.72rem;color:var(--text3);line-height:1.5">
             ℹ️ For Fill in the Blank: use <strong>___</strong> (three underscores) to mark each blank in the question. In the answer line, separate answers for <strong>different blanks</strong> with <strong>|</strong>, and separate <strong>alternate acceptable answers</strong> for the same blank with <strong>/</strong>.
+          </div>
+          <div style="font-size:0.72rem;color:var(--text3);line-height:1.5">
+            ℹ️ For Essay: add a <strong>Rubric:</strong> line after the question, then one <strong>- Criterion: points</strong> line per criterion. A rubric is required — essays with no valid rubric line are skipped.
           </div>
           <div style="font-size:0.72rem;color:var(--text3);line-height:1.5">
             ℹ️ For a code block (any question type): wrap the code in <strong>```</strong> on its own line before and after. Indentation and blank lines inside the fence are kept exactly as typed.
