@@ -534,7 +534,7 @@ function updateImportPreview(input) {
       </div>
 
       {# Points + Group in a row #}
-      <div class="form-row" style="grid-template-columns:100px 1fr;margin-top:0.25rem">
+      <div class="form-row" id="bqPointsGroupRow" style="grid-template-columns:100px 1fr;margin-top:0.25rem">
         <div class="form-group" id="bqPointsField">
           <label class="form-label">Points</label>
           <input type="number" name="points" class="form-control" value="1" min="1">
@@ -542,7 +542,7 @@ function updateImportPreview(input) {
         <div class="form-group">
           <label class="form-label">Group <span style="color:var(--text3);font-weight:400">(optional)</span></label>
           <div style="display:flex;gap:0.4rem">
-            <select name="bank_group_id" id="bankGroupSel" class="form-select" style="flex:1">
+            <select name="bank_group_id" id="bankGroupSel" class="form-select" style="flex:1;min-width:0">
               <option value="">— No group —</option>
               {% for g in bank_groups %}
               <option value="{{ g.id }}">{{ g.name }}{% if g.subject_name %} · {{ g.subject_name }}{% endif %}</option>
@@ -754,6 +754,8 @@ function selectType(type) {
   document.getElementById('bqEssay').style.display   = type === 'essay'          ? '' : 'none';
   // Essay points are computed from the rubric, not typed directly — hide the field.
   document.getElementById('bqPointsField').style.display = type === 'essay' ? 'none' : '';
+  // Points is hidden for essays, so let Group span the full row instead of the 100px Points column
+  document.getElementById('bqPointsGroupRow').style.gridTemplateColumns = type === 'essay' ? '1fr' : '100px 1fr';
   document.getElementById('bankSubmitBtn').disabled = false;
   const qTypeFilter = document.getElementById('qTypeFilter');
   if (qTypeFilter) { qTypeFilter.value = type; filterQ(); }
@@ -971,7 +973,7 @@ function confirmDeleteGroup(id, name, qcount) {
                 data-group="g{{ q.bank_group_id }}">
               <td class="font-mono text-xs text-muted">{{ loop.index }}</td>
               <td style="min-width:160px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ q.question_text }}">{{ q.question_text }}</td>
-              <td>{% if q.question_type == 'multiple_choice' %}<span class="badge badge-blue">MC</span>{% elif q.question_type == 'true_false' %}<span class="badge badge-blue">T/F</span>{% elif q.question_type == 'fill_blank' %}<span class="badge badge-purple">FIB</span>{% elif q.question_type == 'essay' %}<span class="badge badge-gray">📝 Essay</span>{% else %}<span class="badge badge-orange">SA</span>{% endif %}</td>
+              <td>{% if q.question_type == 'multiple_choice' %}<span class="badge badge-blue">MC</span>{% elif q.question_type == 'true_false' %}<span class="badge badge-green">T/F</span>{% elif q.question_type == 'fill_blank' %}<span class="badge badge-purple">FIB</span>{% elif q.question_type == 'essay' %}<span class="badge badge-gray">Essay</span>{% else %}<span class="badge badge-orange">SA</span>{% endif %}</td>
               <td class="font-mono text-sm">{{ q.points }}</td>
               <td>
                 <div class="flex gap-1">
@@ -1021,7 +1023,7 @@ function confirmDeleteGroup(id, name, qcount) {
             data-group="ungrouped">
           <td class="font-mono text-xs text-muted">{{ loop.index }}</td>
           <td style="min-width:160px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ q.question_text }}">{{ q.question_text }}</td>
-          <td>{% if q.question_type == 'multiple_choice' %}<span class="badge badge-blue">MC</span>{% elif q.question_type == 'true_false' %}<span class="badge badge-blue">T/F</span>{% elif q.question_type == 'fill_blank' %}<span class="badge badge-purple">FIB</span>{% elif q.question_type == 'essay' %}<span class="badge badge-gray">📝 Essay</span>{% else %}<span class="badge badge-orange">SA</span>{% endif %}</td>
+          <td>{% if q.question_type == 'multiple_choice' %}<span class="badge badge-blue">MC</span>{% elif q.question_type == 'true_false' %}<span class="badge badge-green">T/F</span>{% elif q.question_type == 'fill_blank' %}<span class="badge badge-purple">FIB</span>{% elif q.question_type == 'essay' %}<span class="badge badge-gray">Essay</span>{% else %}<span class="badge badge-orange">SA</span>{% endif %}</td>
           <td class="font-mono text-sm">{{ q.points }}</td>
           <td>
             <div class="flex gap-1">
@@ -1062,7 +1064,7 @@ function confirmDeleteGroup(id, name, qcount) {
         <label class="form-label">Question</label>
         <textarea name="question_text" class="form-control" rows="3" required>{{ q.question_text }}</textarea>
       </div>
-      <div class="form-row" style="grid-template-columns:100px 1fr">
+      <div class="form-row" style="grid-template-columns:{{ '1fr' if q.question_type == 'essay' else '100px 1fr' }}">
         {% if q.question_type != 'essay' %}
         <div class="form-group">
           <label class="form-label">Points</label>

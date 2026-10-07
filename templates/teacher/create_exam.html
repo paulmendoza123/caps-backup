@@ -113,6 +113,16 @@ function toggleTabLimit(cb) {
 document.addEventListener('DOMContentLoaded', function() {
   const cb = document.getElementById('tabSwitchToggle');
   if (cb) toggleTabLimit(cb);
+
+  // Pre-fill Scheduled Date & Time with the teacher's current local date/time.
+  // Only fills it when empty, so a value the teacher already picked is kept.
+  const sched = document.querySelector('input[name="scheduled_at"]');
+  if (sched && !sched.value) {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    sched.value = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+                + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
 });
 </script>
 {% endblock %}

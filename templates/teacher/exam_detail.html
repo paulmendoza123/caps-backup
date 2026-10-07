@@ -402,10 +402,14 @@
             onclick="filterImportByType('all', this)">All</button>
           <button type="button" class="btn btn-ghost btn-sm import-type-filter-btn" data-type="multiple_choice"
             onclick="filterImportByType('multiple_choice', this)">Multiple Choice</button>
+          <button type="button" class="btn btn-ghost btn-sm import-type-filter-btn" data-type="true_false"
+            onclick="filterImportByType('true_false', this)">True / False</button>
           <button type="button" class="btn btn-ghost btn-sm import-type-filter-btn" data-type="short_answer"
             onclick="filterImportByType('short_answer', this)">Short Answer</button>
           <button type="button" class="btn btn-ghost btn-sm import-type-filter-btn" data-type="fill_blank"
             onclick="filterImportByType('fill_blank', this)">Fill in the Blank</button>
+          <button type="button" class="btn btn-ghost btn-sm import-type-filter-btn" data-type="essay"
+            onclick="filterImportByType('essay', this)">Essay</button>
         </div>
 
         {# Group questions first by bank group, then by exam #}
@@ -424,13 +428,15 @@
 
               {# Count questions in this sub-group — match by same group_key logic,
                  broken down per type so the filter bar can show a live count #}
-              {% set grp_count = namespace(n=0, mc=0, sa=0, fib=0) %}
+              {% set grp_count = namespace(n=0, mc=0, tf=0, sa=0, fib=0, essay=0) %}
               {% for cq in bank_questions %}
                 {% set in_group = (bq.bank_group_id and cq.bank_group_id == bq.bank_group_id) or (not bq.bank_group_id and cq.exam_title == bq.exam_title and not cq.bank_group_id) %}
                 {% if in_group %}
                   {% set grp_count.n = grp_count.n + 1 %}
                   {% if cq.question_type == 'multiple_choice' %}{% set grp_count.mc = grp_count.mc + 1 %}
+                  {% elif cq.question_type == 'true_false' %}{% set grp_count.tf = grp_count.tf + 1 %}
                   {% elif cq.question_type == 'fill_blank' %}{% set grp_count.fib = grp_count.fib + 1 %}
+                  {% elif cq.question_type == 'essay' %}{% set grp_count.essay = grp_count.essay + 1 %}
                   {% else %}{% set grp_count.sa = grp_count.sa + 1 %}{% endif %}
                 {% endif %}
               {% endfor %}
@@ -471,8 +477,10 @@
                     <span class="grp-count-label" style="font-size:0.72rem;color:var(--text2)"
                       data-count-all="{{ grp_count.n }}"
                       data-count-multiple_choice="{{ grp_count.mc }}"
+                      data-count-true_false="{{ grp_count.tf }}"
                       data-count-short_answer="{{ grp_count.sa }}"
-                      data-count-fill_blank="{{ grp_count.fib }}">{{ grp_count.n }} question{{ 's' if grp_count.n != 1 else '' }}</span>
+                      data-count-fill_blank="{{ grp_count.fib }}"
+                      data-count-essay="{{ grp_count.essay }}">{{ grp_count.n }} question{{ 's' if grp_count.n != 1 else '' }}</span>
                     <span class="arrow" style="font-size:0.75rem;color:var(--text3)">▶</span>
                   </span>
                 </button>
@@ -1194,8 +1202,10 @@ function filterImportByType(type, btn) {
       const keyMap = {
         all: 'countAll',
         multiple_choice: 'countMultiple_choice',
+        true_false: 'countTrue_false',
         short_answer: 'countShort_answer',
-        fill_blank: 'countFill_blank'
+        fill_blank: 'countFill_blank',
+        essay: 'countEssay'
       };
       const n = parseInt(countLabel.dataset[keyMap[type]] || '0', 10);
       countLabel.textContent = n + ' question' + (n !== 1 ? 's' : '');
