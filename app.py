@@ -1022,6 +1022,13 @@ def login():
             flash('Invalid email or password.', 'error')
     return render_template('login.html')
 
+ALLOWED_SIGNUP_EMAIL_DOMAIN = '@psu.palawan.edu.ph'
+
+
+def _is_allowed_signup_email(email):
+    return email.strip().lower().endswith(ALLOWED_SIGNUP_EMAIL_DOMAIN)
+
+
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
     if 'user_id' in session:
@@ -1040,6 +1047,9 @@ def signup():
             return render_template('signup.html', programs=programs)
         if password != confirm_password:
             flash('Passwords do not match.', 'error')
+            return render_template('signup.html', programs=programs)
+        if not _is_allowed_signup_email(email):
+            flash(f'Only {ALLOWED_SIGNUP_EMAIL_DOMAIN} email addresses can sign up.', 'error')
             return render_template('signup.html', programs=programs)
         try:
             conn = get_db()
@@ -1068,6 +1078,9 @@ def signup_teacher():
             return render_template('signup_teacher.html')
         if password != confirm_password:
             flash('Passwords do not match.', 'error')
+            return render_template('signup_teacher.html')
+        if not _is_allowed_signup_email(email):
+            flash(f'Only {ALLOWED_SIGNUP_EMAIL_DOMAIN} email addresses can sign up.', 'error')
             return render_template('signup_teacher.html')
         try:
             conn = get_db()

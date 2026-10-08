@@ -100,7 +100,7 @@
           <span class="exam-meta-item">📚 {{ exam.subject_name }}</span>
           {% if exam.session_status == 'submitted' and exam.score is not none %}
           <span class="exam-meta-item fw-600 {% if exam.total_points and (exam.score * 100 / exam.total_points) >= (exam.passing_score if exam.passing_score is not none else 75) %}text-success{% else %}text-danger{% endif %}">
-            {{ exam.score|score_fmt }}/{{ exam.total_points }} ({{ (exam.score * 100 / exam.total_points)|int }}%)
+            {{ exam.score|score_fmt }}/{{ exam.total_points }} ({{ (exam.score * 100 / exam.total_points)|int if exam.total_points else 0 }}%)
           </span>
           {% endif %}
         </div>
