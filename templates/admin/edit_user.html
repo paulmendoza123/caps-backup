@@ -57,7 +57,22 @@
     <form method="POST" action="{{ url_for('admin_reset_password', user_id=user.id) }}" onsubmit="return confirm('Reset password for {{ user.full_name }}? The new password will be shown once.')">
       <div class="form-group">
         <label class="form-label">New Password</label>
-        <input type="text" name="new_password" class="form-control font-mono" placeholder="Enter new password" required minlength="6" />
+        <input type="text" name="new_password" id="reset-user-password" class="form-control font-mono" placeholder="Enter new password" required minlength="8" />
+        <div class="pw-requirements" data-target="reset-user-password">
+          <div class="pw-req-title">Password must contain:</div>
+          <div class="pw-req-item" data-rule="length">
+            <div class="pw-req-item-row"><span class="pw-req-icon"></span> At least 8 characters</div>
+          </div>
+          <div class="pw-req-item" data-rule="variety">
+            <div class="pw-req-item-row"><span class="pw-req-icon"></span> At least 3 of the following:</div>
+            <div class="pw-req-subitems">
+              <div class="pw-req-subitem" data-rule="lower"><span class="pw-req-icon"></span> Lower case letters (a-z)</div>
+              <div class="pw-req-subitem" data-rule="upper"><span class="pw-req-icon"></span> Upper case letters (A-Z)</div>
+              <div class="pw-req-subitem" data-rule="number"><span class="pw-req-icon"></span> Numbers (0-9)</div>
+              <div class="pw-req-subitem" data-rule="special"><span class="pw-req-icon"></span> Special characters (e.g. !@#$%^&*)</div>
+            </div>
+          </div>
+        </div>
       </div>
       <button type="submit" class="btn btn-danger btn-sm">🔑 Save New Password</button>
     </form>

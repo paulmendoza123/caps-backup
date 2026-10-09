@@ -959,6 +959,26 @@ def background_maintenance_loop(interval_seconds=20):
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
+
+def validate_password_strength(password):
+    """Returns None if the password is strong enough, or an error message
+    otherwise. Rule: at least 8 characters, AND at least 3 of the 4
+    character classes (lowercase, uppercase, digit, special character) —
+    matches the live checklist shown next to every "set a new password"
+    field in the UI."""
+    if len(password) < 8:
+        return 'Password must be at least 8 characters long.'
+    classes_met = sum([
+        bool(re.search(r'[a-z]', password)),
+        bool(re.search(r'[A-Z]', password)),
+        bool(re.search(r'[0-9]', password)),
+        bool(re.search(r'[^A-Za-z0-9]', password)),
+    ])
+    if classes_met < 3:
+        return ('Password must contain at least 3 of the following: lowercase letters, '
+                'uppercase letters, numbers, special characters.')
+    return None
+
 # ─── Auth Decorators ─────────────────────────────────────────────────────────
 
 def login_required(f):
@@ -1051,6 +1071,10 @@ def signup():
         if not _is_allowed_signup_email(email):
             flash(f'Only {ALLOWED_SIGNUP_EMAIL_DOMAIN} email addresses can sign up.', 'error')
             return render_template('signup.html', programs=programs)
+        pw_error = validate_password_strength(password)
+        if pw_error:
+            flash(pw_error, 'error')
+            return render_template('signup.html', programs=programs)
         try:
             conn = get_db()
             conn.execute('''
@@ -1081,6 +1105,10 @@ def signup_teacher():
             return render_template('signup_teacher.html')
         if not _is_allowed_signup_email(email):
             flash(f'Only {ALLOWED_SIGNUP_EMAIL_DOMAIN} email addresses can sign up.', 'error')
+            return render_template('signup_teacher.html')
+        pw_error = validate_password_strength(password)
+        if pw_error:
+            flash(pw_error, 'error')
             return render_template('signup_teacher.html')
         try:
             conn = get_db()
@@ -4017,6 +4045,10 @@ def admin_create_user():
         if not all([full_name, email, password, role]):
             flash('Please fill in all required fields.', 'error')
         else:
+            pw_error = validate_password_strength(password)
+            if pw_error:
+                flash(pw_error, 'error')
+                return render_template('admin/create_user.html', programs=programs)
             try:
                 conn = get_db()
                 conn.execute('''
@@ -4168,11 +4200,34 @@ def admin_settings():
     }
     return render_template('admin/settings.html', db_size=db_size, record_counts=record_counts)
 
-@app.route('/admin/profile')
+@app.route('/admin/profile', methods=['GET', 'POST'])
 @role_required('admin')
 def admin_profile():
     conn = get_db()
     user = conn.execute('SELECT * FROM users WHERE id=?', (session['user_id'],)).fetchone()
+
+    if request.method == 'POST':
+        current_password = request.form.get('current_password', '')
+        new_password = request.form.get('new_password', '')
+        confirm_password = request.form.get('confirm_password', '')
+
+        if not all([current_password, new_password, confirm_password]):
+            flash('Please fill in all password fields.', 'error')
+        elif hash_password(current_password) != user['password']:
+            flash('Current password is incorrect.', 'error')
+        elif new_password != confirm_password:
+            flash('New passwords do not match.', 'error')
+        else:
+            pw_error = validate_password_strength(new_password)
+            if pw_error:
+                flash(pw_error, 'error')
+            else:
+                conn.execute('UPDATE users SET password=? WHERE id=?',
+                             (hash_password(new_password), session['user_id']))
+                conn.commit()
+                flash('Password updated successfully.', 'success')
+                return redirect(url_for('admin_profile'))
+
     return render_template('admin/profile.html', user=user)
 
 
@@ -4272,8 +4327,9 @@ def admin_reset_password(user_id):
         flash('User not found.', 'error')
         return redirect(url_for('admin_users'))
     new_password = request.form.get('new_password', '').strip()
-    if len(new_password) < 6:
-        flash('Password must be at least 6 characters.', 'error')
+    pw_error = validate_password_strength(new_password)
+    if pw_error:
+        flash(pw_error, 'error')
         return redirect(url_for('admin_edit_user', user_id=user_id))
     conn.execute('UPDATE users SET password=? WHERE id=?', (hash_password(new_password), user_id))
     conn.commit()

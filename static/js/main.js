@@ -120,6 +120,37 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
+  // Live password-requirements checklist (length + character variety)
+  document.querySelectorAll('.pw-requirements').forEach(box => {
+    const input = document.getElementById(box.dataset.target);
+    if (!input) return;
+    const lengthItem = box.querySelector('[data-rule="length"]');
+    const varietyItem = box.querySelector('[data-rule="variety"]');
+    const subLower = box.querySelector('[data-rule="lower"]');
+    const subUpper = box.querySelector('[data-rule="upper"]');
+    const subNumber = box.querySelector('[data-rule="number"]');
+    const subSpecial = box.querySelector('[data-rule="special"]');
+
+    const check = () => {
+      const val = input.value;
+      const hasLower = /[a-z]/.test(val);
+      const hasUpper = /[A-Z]/.test(val);
+      const hasNumber = /[0-9]/.test(val);
+      const hasSpecial = /[^A-Za-z0-9]/.test(val);
+      const classesMet = [hasLower, hasUpper, hasNumber, hasSpecial].filter(Boolean).length;
+
+      lengthItem?.classList.toggle('met', val.length >= 8);
+      subLower?.classList.toggle('met', hasLower);
+      subUpper?.classList.toggle('met', hasUpper);
+      subNumber?.classList.toggle('met', hasNumber);
+      subSpecial?.classList.toggle('met', hasSpecial);
+      varietyItem?.classList.toggle('met', classesMet >= 3);
+    };
+
+    input.addEventListener('input', check);
+    check(); // initial state, e.g. browser autofill
+  });
+
   // Live password confirmation match check
   document.querySelectorAll('[data-confirm-target]').forEach(confirmInput => {
     const original = document.getElementById(confirmInput.dataset.confirmTarget);

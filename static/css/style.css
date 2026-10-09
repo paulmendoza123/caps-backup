@@ -416,6 +416,57 @@ body {
   display: none;
 }
 .password-mismatch-msg.is-visible { display: block; }
+
+/* Some browsers (notably Microsoft Edge, and some Chrome/Android builds)
+   draw their OWN built-in "show password" eye icon inside every
+   type="password" field. That native icon sits in the same spot as our
+   custom .password-toggle-btn, which is what makes it look "doubled".
+   Turn the browser's native icon off everywhere so only ours shows. */
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear {
+  display: none;
+  width: 0;
+  height: 0;
+}
+input[type="password"]::-webkit-credentials-auto-fill-button,
+input[type="password"]::-webkit-strong-password-auto-fill-button {
+  visibility: hidden;
+  display: none !important;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+}
+
+.pw-requirements {
+  font-size: 0.8rem;
+  margin-top: 0.5rem;
+  padding: 0.7rem 0.9rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.pw-requirements .pw-req-title {
+  font-weight: 600;
+  color: var(--text2);
+  margin-bottom: 0.4rem;
+}
+.pw-req-item { padding: 0.12rem 0; color: var(--text3); transition: color 0.15s ease; }
+.pw-req-item-row, .pw-req-subitem {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  color: inherit;
+  padding: 0.12rem 0;
+  transition: color 0.15s ease;
+}
+.pw-req-subitems { margin-left: 1.15rem; margin-top: 0.1rem; }
+.pw-req-icon { flex-shrink: 0; width: 1em; font-weight: 700; }
+.pw-req-icon::before { content: "○"; }
+.pw-req-subitem .pw-req-icon::before { content: "•"; }
+.pw-req-item.met, .pw-req-subitem.met { color: var(--accent2); }
+.pw-req-item.met .pw-req-icon::before,
+.pw-req-subitem.met .pw-req-icon::before { content: "✓"; }
+
 .form-control::placeholder { color: var(--text3); }
 textarea.form-control { resize: vertical; min-height: 100px; }
 .form-select option { background: var(--bg2); }
