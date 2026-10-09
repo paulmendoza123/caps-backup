@@ -129,7 +129,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const subLower = box.querySelector('[data-rule="lower"]');
     const subUpper = box.querySelector('[data-rule="upper"]');
     const subNumber = box.querySelector('[data-rule="number"]');
-    const subSpecial = box.querySelector('[data-rule="special"]');
+    const specialItem = box.querySelector('[data-rule="special"]');
+
+    // On the signup pages, once the person has tried to submit (or the server
+    // rejected the password), any requirement that is NOT met turns red.
+    let showFailed = box.dataset.showFailed === '1';
 
     const check = () => {
       const val = input.value;
@@ -137,15 +141,34 @@ document.addEventListener('DOMContentLoaded', () => {
       const hasUpper = /[A-Z]/.test(val);
       const hasNumber = /[0-9]/.test(val);
       const hasSpecial = /[^A-Za-z0-9]/.test(val);
-      const classesMet = [hasLower, hasUpper, hasNumber, hasSpecial].filter(Boolean).length;
+      // Special characters are their own requirement; the "at least 3 of the following"
+      // group only covers lower case, upper case and numbers.
+      const classesMet = [hasLower, hasUpper, hasNumber].filter(Boolean).length;
+      const lengthOk = val.length >= 8;
+      const specialOk = hasSpecial;
+      const varietyOk = classesMet >= 3;
 
-      lengthItem?.classList.toggle('met', val.length >= 8);
+      lengthItem?.classList.toggle('met', lengthOk);
       subLower?.classList.toggle('met', hasLower);
       subUpper?.classList.toggle('met', hasUpper);
       subNumber?.classList.toggle('met', hasNumber);
-      subSpecial?.classList.toggle('met', hasSpecial);
-      varietyItem?.classList.toggle('met', classesMet >= 3);
+      specialItem?.classList.toggle('met', specialOk);
+      varietyItem?.classList.toggle('met', varietyOk);
+
+      lengthItem?.classList.toggle('failed', showFailed && !lengthOk);
+      specialItem?.classList.toggle('failed', showFailed && !specialOk);
+      varietyItem?.classList.toggle('failed', showFailed && !varietyOk);
+      // Only highlight the individual character types when the "3 of 4" rule itself failed
+      const flagSub = (el, ok) => el?.classList.toggle('failed', showFailed && !varietyOk && !ok);
+      flagSub(subLower, hasLower);
+      flagSub(subUpper, hasUpper);
+      flagSub(subNumber, hasNumber);
+
+      return lengthOk && specialOk && varietyOk;
     };
+
+    // Called by the signup form on submit: start showing red, return whether all rules pass
+    box.enableFailed = () => { showFailed = true; return check(); };
 
     input.addEventListener('input', check);
     check(); // initial state, e.g. browser autofill
@@ -167,7 +190,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     confirmInput.addEventListener('input', check);
     original.addEventListener('input', check);
-    if (form) {
+    if (form && !form.hasAttribute('data-auth-form')) {
       form.addEventListener('submit', e => {
         if (!check()) {
           e.preventDefault();
@@ -176,4 +199,195 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
   });
+
+  // Signup forms: validate on submit and turn ONLY the failing fields /
+  // requirements red (no message at the top of the page).
+  document.querySelectorAll('form[data-auth-form]').forEach(form => {
+    const emailPattern = /^[^@\s]+@psu\.palawan\.edu\.ph$/i;
+    const emailInput = form.querySelector('input[type="email"]');
+    const emailHint = form.querySelector('[data-email-hint]');
+    const pwInput = form.querySelector('.pw-requirements') &&
+      document.getElementById(form.querySelector('.pw-requirements').dataset.target);
+    const pwBox = form.querySelector('.pw-requirements');
+    const confirmInput = form.querySelector('[data-confirm-target]');
+    const mismatchMsg = confirmInput?.closest('.form-group')?.querySelector('.password-mismatch-msg');
+
+    const resetEmailHint = () => {
+      if (!emailHint) return;
+      emailHint.classList.remove('is-error');
+      emailHint.textContent = emailHint.dataset.default;
+    };
+
+    // Clear a field's red state as soon as the person edits it
+    form.querySelectorAll('input, select').forEach(el => {
+      const clear = () => {
+        if (el === emailInput) resetEmailHint();
+        if (el === pwInput || el === confirmInput) {
+          if (confirmInput && confirmInput.value === pwInput.value) {
+            confirmInput.classList.remove('is-invalid');
+            mismatchMsg?.classList.remove('is-visible');
+          }
+        }
+        if (el !== pwInput) el.classList.remove('is-invalid');
+        else if (pwBox && pwBox.enableFailed && el.classList.contains('is-invalid')) {
+          // keep the checklist live, clear the red border once everything passes
+          const ok = pwBox.enableFailed();
+          if (ok) el.classList.remove('is-invalid');
+        }
+      };
+      el.addEventListener('input', clear);
+      el.addEventListener('change', clear);
+    });
+
+    form.addEventListener('submit', e => {
+      let firstBad = null;
+      const flag = el => { el.classList.add('is-invalid'); firstBad = firstBad || el; };
+
+      // Empty required fields (text, selects)
+      form.querySelectorAll('input[required], select[required]').forEach(el => {
+        const empty = el.type === 'password' ? !el.value : !el.value.trim();
+        if (empty) flag(el);
+      });
+
+      // Email must be a @psu.palawan.edu.ph address
+      if (emailInput && emailInput.value.trim() && !emailPattern.test(emailInput.value.trim())) {
+        flag(emailInput);
+        emailHint?.classList.add('is-error');
+      }
+
+      // Password requirements: unmet ones turn red
+      if (pwBox && pwBox.enableFailed && pwInput) {
+        if (!pwBox.enableFailed()) flag(pwInput);
+      }
+
+      // Confirm password must match
+      if (confirmInput && pwInput && confirmInput.value && confirmInput.value !== pwInput.value) {
+        flag(confirmInput);
+        mismatchMsg?.classList.add('is-visible');
+      }
+
+      if (firstBad) {
+        e.preventDefault();
+        firstBad.focus();
+      }
+    });
+
+    // If the server sent the page back with errors, jump to the first one
+    const serverBad = form.querySelector('.is-invalid');
+    if (serverBad) serverBad.focus();
+  });
+
+  // Forms outside the sign-up pages (admin: My Profile, Create User, Edit User,
+  // Reset Password): block the submit and turn whatever failed red — the email
+  // field and/or the unmet password requirements.
+  document.querySelectorAll('form').forEach(form => {
+    if (form.hasAttribute('data-auth-form')) return; // sign-up pages handle this themselves
+    const pwBox = form.querySelector('.pw-requirements');
+    const pwInput = pwBox && pwBox.enableFailed ? document.getElementById(pwBox.dataset.target) : null;
+    const emailInput = form.querySelector('input[data-psu-email]');
+    // Student accounts must have a program and a year level
+    const roleSelect = form.querySelector('select[name="role"]');
+    const programSel = form.querySelector('select[name="program"]');
+    const yearSel = form.querySelector('select[name="year_level"]');
+    const hasStudentFields = !!(roleSelect && programSel && yearSel);
+    if (!pwInput && !emailInput && !hasStudentFields) return;
+
+    const confirmInput = form.querySelector('[data-confirm-target]');
+    const mismatchMsg = confirmInput?.closest('.form-group')?.querySelector('.password-mismatch-msg');
+    const emailPattern = /^[^@\s]+@psu\.palawan\.edu\.ph$/i;
+    const emailHint = form.querySelector('[data-email-hint]');
+
+    // Email: must be @psu.palawan.edu.ph — unless it is an existing address
+    // that is being left unchanged (data-original), e.g. the default admin.
+    const emailIsBad = () => {
+      const v = emailInput.value.trim();
+      if (!v) return false; // empty is caught by "required"
+      const original = (emailInput.dataset.original || '').toLowerCase();
+      if (original && v.toLowerCase() === original) return false;
+      return !emailPattern.test(v);
+    };
+    const clearEmailRed = () => {
+      emailInput.classList.remove('is-invalid');
+      if (emailHint) { emailHint.classList.remove('is-error'); emailHint.textContent = emailHint.dataset.default; }
+    };
+
+    // Capture phase + stopImmediatePropagation so inline/other submit prompts
+    // ("Reset password for…?", "Grant full admin access…?") don't pop up for
+    // a form that is going to be rejected anyway.
+    form.addEventListener('submit', e => {
+      let bad = null;
+      if (emailInput && emailIsBad()) {
+        emailInput.classList.add('is-invalid');
+        emailHint?.classList.add('is-error');
+        bad = emailInput;
+      }
+      if (pwInput && !pwBox.enableFailed()) { pwInput.classList.add('is-invalid'); bad = bad || pwInput; }
+      if (hasStudentFields && roleSelect.value === 'student') {
+        [programSel, yearSel].forEach(sel => {
+          if (!sel.value) { sel.classList.add('is-invalid'); bad = bad || sel; }
+        });
+      }
+      if (pwInput && confirmInput && confirmInput.value && confirmInput.value !== pwInput.value) {
+        confirmInput.classList.add('is-invalid');
+        mismatchMsg?.classList.add('is-visible');
+        bad = bad || confirmInput;
+      }
+      if (bad) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        bad.focus();
+      }
+    }, true);
+
+    // Any other field flagged red (e.g. "Current password is incorrect") clears once edited
+    form.querySelectorAll('input.is-invalid').forEach(el => {
+      if (el === pwInput || el === confirmInput || el === emailInput) return;
+      el.addEventListener('input', () => el.classList.remove('is-invalid'));
+    });
+
+    if (hasStudentFields) {
+      [programSel, yearSel].forEach(sel => sel.addEventListener('change', () => sel.classList.remove('is-invalid')));
+      roleSelect.addEventListener('change', () => {
+        if (roleSelect.value !== 'student') [programSel, yearSel].forEach(s => s.classList.remove('is-invalid'));
+      });
+    }
+
+    if (emailInput) {
+      emailInput.addEventListener('input', clearEmailRed);
+      // Empty / not-an-email is stopped by the browser first — still show it red
+      emailInput.addEventListener('invalid', () => {
+        emailInput.classList.add('is-invalid');
+        if (emailInput.value.trim()) emailHint?.classList.add('is-error');
+      });
+    }
+
+    if (pwInput) {
+      // An empty password is stopped by the browser's "required" check before
+      // submit — still show the checklist in red in that case.
+      pwInput.addEventListener('invalid', () => {
+        pwBox.enableFailed();
+        pwInput.classList.add('is-invalid');
+      });
+      // Clear the red border as soon as the password passes everything
+      pwInput.addEventListener('input', () => {
+        if (pwInput.classList.contains('is-invalid') && pwBox.enableFailed()) {
+          pwInput.classList.remove('is-invalid');
+        }
+      });
+      if (confirmInput) {
+        const syncConfirm = () => {
+          if (confirmInput.value === pwInput.value) {
+            confirmInput.classList.remove('is-invalid');
+            mismatchMsg?.classList.remove('is-visible');
+          }
+        };
+        confirmInput.addEventListener('input', syncConfirm);
+        pwInput.addEventListener('input', syncConfirm);
+      }
+    }
+  });
+
+  // If the server sent an admin page back with a failed email, jump to it
+  const serverBad = document.querySelector('input.is-invalid, select.is-invalid');
+  if (serverBad) serverBad.focus();
 });

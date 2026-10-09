@@ -962,21 +962,22 @@ def hash_password(password):
 
 def validate_password_strength(password):
     """Returns None if the password is strong enough, or an error message
-    otherwise. Rule: at least 8 characters, AND at least 3 of the 4
-    character classes (lowercase, uppercase, digit, special character) —
-    matches the live checklist shown next to every "set a new password"
-    field in the UI."""
+    otherwise. Rule: at least 8 characters, at least 1 special character,
+    AND at least 3 of the following: lowercase letters, uppercase letters,
+    numbers (i.e. all three) — matches the live checklist shown next to
+    every "set a new password" field in the UI."""
     if len(password) < 8:
         return 'Password must be at least 8 characters long.'
+    if not re.search(r'[^A-Za-z0-9]', password):
+        return 'Password must contain at least 1 special character.'
     classes_met = sum([
         bool(re.search(r'[a-z]', password)),
         bool(re.search(r'[A-Z]', password)),
         bool(re.search(r'[0-9]', password)),
-        bool(re.search(r'[^A-Za-z0-9]', password)),
     ])
     if classes_met < 3:
         return ('Password must contain at least 3 of the following: lowercase letters, '
-                'uppercase letters, numbers, special characters.')
+                'uppercase letters, numbers.')
     return None
 
 # ─── Auth Decorators ─────────────────────────────────────────────────────────
@@ -1015,12 +1016,16 @@ def index():
 def login():
     if 'user_id' in session:
         return redirect(url_for(f"{session['role']}_home"))
+    form = {}
     if request.method == 'POST':
         email = request.form.get('email', '').strip()
         password = request.form.get('password', '')
+        # Keep what the person typed so a failed attempt doesn't wipe the form.
+        # (The password itself is deliberately not echoed back.)
+        form = {'email': email}
         if not email or not password:
             flash('Please fill in all fields.', 'error')
-            return render_template('login.html')
+            return render_template('login.html', form=form)
         conn = get_db()
         user = conn.execute(
             'SELECT * FROM users WHERE email = ? AND password = ?',
@@ -1040,7 +1045,7 @@ def login():
             conn.execute('INSERT INTO login_logs (email, success) VALUES (?,0)', (email,))
             conn.commit()
             flash('Invalid email or password.', 'error')
-    return render_template('login.html')
+    return render_template('login.html', form=form)
 
 ALLOWED_SIGNUP_EMAIL_DOMAIN = '@psu.palawan.edu.ph'
 
@@ -1049,79 +1054,91 @@ def _is_allowed_signup_email(email):
     return email.strip().lower().endswith(ALLOWED_SIGNUP_EMAIL_DOMAIN)
 
 
+SIGNUP_REQUIRED_STUDENT = ['full_name', 'email', 'password', 'confirm_password', 'program', 'year_level']
+SIGNUP_REQUIRED_TEACHER = ['full_name', 'email', 'password', 'confirm_password']
+
+
+def _validate_signup_form(form, required):
+    """Returns {field_name: True} for every field that failed validation
+    (empty, bad email domain, weak password, passwords not matching).
+    The signup pages turn exactly those fields/requirements red instead of
+    showing a message at the top of the page."""
+    errors = {}
+    for key in required:
+        if not form.get(key):
+            errors[key] = True
+    email = form.get('email', '')
+    if email and not _is_allowed_signup_email(email):
+        errors['email'] = True
+    password = form.get('password', '')
+    if password and validate_password_strength(password):
+        errors['password'] = True
+    confirm = form.get('confirm_password', '')
+    if password and confirm and password != confirm:
+        errors['confirm_password'] = True
+    return errors
+
+
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
     if 'user_id' in session:
         return redirect(url_for(f"{session['role']}_home"))
     conn = get_db()
     programs = conn.execute('SELECT * FROM programs ORDER BY code').fetchall()
+    form, errors = {}, {}
     if request.method == 'POST':
-        full_name = request.form.get('full_name', '').strip()
-        email = request.form.get('email', '').strip()
-        password = request.form.get('password', '')
-        confirm_password = request.form.get('confirm_password', '')
-        program = request.form.get('program', '')
-        year_level = request.form.get('year_level', '')
-        if not all([full_name, email, password, confirm_password, program, year_level]):
-            flash('Please fill in all fields.', 'error')
-            return render_template('signup.html', programs=programs)
-        if password != confirm_password:
-            flash('Passwords do not match.', 'error')
-            return render_template('signup.html', programs=programs)
-        if not _is_allowed_signup_email(email):
-            flash(f'Only {ALLOWED_SIGNUP_EMAIL_DOMAIN} email addresses can sign up.', 'error')
-            return render_template('signup.html', programs=programs)
-        pw_error = validate_password_strength(password)
-        if pw_error:
-            flash(pw_error, 'error')
-            return render_template('signup.html', programs=programs)
-        try:
-            conn = get_db()
-            conn.execute('''
-                INSERT INTO users (full_name, email, password, role, program, year_level)
-                VALUES (?, ?, ?, 'student', ?, ?)
-            ''', (full_name, email, hash_password(password), program, year_level))
-            conn.commit()
-            flash('Account created! You can now log in.', 'success')
-            return redirect(url_for('login'))
-        except sqlite3.IntegrityError:
-            flash('Email already exists.', 'error')
-    return render_template('signup.html', programs=programs)
+        form = {
+            'full_name': request.form.get('full_name', '').strip(),
+            'email': request.form.get('email', '').strip(),
+            'password': request.form.get('password', ''),
+            'confirm_password': request.form.get('confirm_password', ''),
+            'program': request.form.get('program', ''),
+            'year_level': request.form.get('year_level', ''),
+        }
+        errors = _validate_signup_form(form, SIGNUP_REQUIRED_STUDENT)
+        if not errors:
+            try:
+                conn = get_db()
+                conn.execute('''
+                    INSERT INTO users (full_name, email, password, role, program, year_level)
+                    VALUES (?, ?, ?, 'student', ?, ?)
+                ''', (form['full_name'], form['email'], hash_password(form['password']),
+                      form['program'], form['year_level']))
+                conn.commit()
+                flash('Account created! You can now log in.', 'success')
+                return redirect(url_for('login'))
+            except sqlite3.IntegrityError:
+                errors['email'] = True
+                errors['email_msg'] = 'Email already exists.'
+    return render_template('signup.html', programs=programs, form=form, errors=errors)
 
 @app.route('/signup/teacher', methods=['GET', 'POST'])
 def signup_teacher():
     if 'user_id' in session:
         return redirect(url_for(f"{session['role']}_home"))
+    form, errors = {}, {}
     if request.method == 'POST':
-        full_name = request.form.get('full_name', '').strip()
-        email = request.form.get('email', '').strip()
-        password = request.form.get('password', '')
-        confirm_password = request.form.get('confirm_password', '')
-        if not all([full_name, email, password, confirm_password]):
-            flash('Please fill in all fields.', 'error')
-            return render_template('signup_teacher.html')
-        if password != confirm_password:
-            flash('Passwords do not match.', 'error')
-            return render_template('signup_teacher.html')
-        if not _is_allowed_signup_email(email):
-            flash(f'Only {ALLOWED_SIGNUP_EMAIL_DOMAIN} email addresses can sign up.', 'error')
-            return render_template('signup_teacher.html')
-        pw_error = validate_password_strength(password)
-        if pw_error:
-            flash(pw_error, 'error')
-            return render_template('signup_teacher.html')
-        try:
-            conn = get_db()
-            conn.execute('''
-                INSERT INTO users (full_name, email, password, role)
-                VALUES (?, ?, ?, 'teacher')
-            ''', (full_name, email, hash_password(password)))
-            conn.commit()
-            flash('Teacher account created! You can now log in.', 'success')
-            return redirect(url_for('login'))
-        except sqlite3.IntegrityError:
-            flash('Email already exists.', 'error')
-    return render_template('signup_teacher.html')
+        form = {
+            'full_name': request.form.get('full_name', '').strip(),
+            'email': request.form.get('email', '').strip(),
+            'password': request.form.get('password', ''),
+            'confirm_password': request.form.get('confirm_password', ''),
+        }
+        errors = _validate_signup_form(form, SIGNUP_REQUIRED_TEACHER)
+        if not errors:
+            try:
+                conn = get_db()
+                conn.execute('''
+                    INSERT INTO users (full_name, email, password, role)
+                    VALUES (?, ?, ?, 'teacher')
+                ''', (form['full_name'], form['email'], hash_password(form['password'])))
+                conn.commit()
+                flash('Teacher account created! You can now log in.', 'success')
+                return redirect(url_for('login'))
+            except sqlite3.IntegrityError:
+                errors['email'] = True
+                errors['email_msg'] = 'Email already exists.'
+    return render_template('signup_teacher.html', form=form, errors=errors)
 
 @app.route('/logout')
 def logout():
@@ -4035,6 +4052,7 @@ def admin_users():
 def admin_create_user():
     conn = get_db()
     programs = conn.execute('SELECT * FROM programs ORDER BY code').fetchall()
+    form, errors = {}, {}
     if request.method == 'POST':
         full_name  = request.form.get('full_name', '').strip()
         email      = request.form.get('email', '').strip()
@@ -4042,25 +4060,38 @@ def admin_create_user():
         role       = request.form.get('role', '')
         program    = request.form.get('program', '')
         year_level = request.form.get('year_level', '')
+        # Keep what was typed so a failed attempt doesn't wipe the form
+        # (the password itself is not sent back).
+        form = {'full_name': full_name, 'email': email, 'role': role,
+                'program': program, 'year_level': year_level}
         if not all([full_name, email, password, role]):
             flash('Please fill in all required fields.', 'error')
         else:
-            pw_error = validate_password_strength(password)
-            if pw_error:
-                flash(pw_error, 'error')
-                return render_template('admin/create_user.html', programs=programs)
-            try:
-                conn = get_db()
-                conn.execute('''
-                    INSERT INTO users (full_name, email, password, role, program, year_level, created_by)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (full_name, email, hash_password(password), role, program, year_level, session['user_id']))
-                conn.commit()
-                flash(f'Account created for {full_name}!', 'success')
-                return redirect(url_for('admin_users'))
-            except sqlite3.IntegrityError:
-                flash('Email already exists.', 'error')
-    return render_template('admin/create_user.html', programs=programs)
+            # Collect every problem at once; the page turns exactly those fields red
+            if not _is_allowed_signup_email(email):
+                errors['email'] = True
+            if role == 'student':
+                if not program:
+                    errors['program'] = True
+                if not year_level:
+                    errors['year_level'] = True
+            if not errors:
+                pw_error = validate_password_strength(password)
+                if pw_error:
+                    flash(pw_error, 'error')
+                    return render_template('admin/create_user.html', programs=programs, form=form, errors=errors)
+                try:
+                    conn = get_db()
+                    conn.execute('''
+                        INSERT INTO users (full_name, email, password, role, program, year_level, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (full_name, email, hash_password(password), role, program, year_level, session['user_id']))
+                    conn.commit()
+                    flash(f'Account created for {full_name}!', 'success')
+                    return redirect(url_for('admin_users'))
+                except sqlite3.IntegrityError:
+                    flash('Email already exists.', 'error')
+    return render_template('admin/create_user.html', programs=programs, form=form, errors=errors)
 
 @app.route('/admin/users/delete/<int:user_id>', methods=['POST'])
 @role_required('admin')
@@ -4205,22 +4236,32 @@ def admin_settings():
 def admin_profile():
     conn = get_db()
     user = conn.execute('SELECT * FROM users WHERE id=?', (session['user_id'],)).fetchone()
+    form, errors = {}, {}
 
     if request.method == 'POST':
         current_password = request.form.get('current_password', '')
         new_password = request.form.get('new_password', '')
         confirm_password = request.form.get('confirm_password', '')
+        # Keep what was typed so a failed attempt doesn't wipe the form
+        form = {'current_password': current_password, 'new_password': new_password,
+                'confirm_password': confirm_password}
 
         if not all([current_password, new_password, confirm_password]):
             flash('Please fill in all password fields.', 'error')
+            for key, val in form.items():
+                if not val:
+                    errors[key] = True
         elif hash_password(current_password) != user['password']:
             flash('Current password is incorrect.', 'error')
+            errors['current_password'] = True
         elif new_password != confirm_password:
             flash('New passwords do not match.', 'error')
+            errors['confirm_password'] = True
         else:
             pw_error = validate_password_strength(new_password)
             if pw_error:
                 flash(pw_error, 'error')
+                errors['new_password'] = True
             else:
                 conn.execute('UPDATE users SET password=? WHERE id=?',
                              (hash_password(new_password), session['user_id']))
@@ -4228,7 +4269,7 @@ def admin_profile():
                 flash('Password updated successfully.', 'success')
                 return redirect(url_for('admin_profile'))
 
-    return render_template('admin/profile.html', user=user)
+    return render_template('admin/profile.html', user=user, form=form, errors=errors)
 
 
 
@@ -4295,27 +4336,45 @@ def admin_edit_user(user_id):
         flash('User not found.', 'error')
         return redirect(url_for('admin_users'))
     programs = conn.execute('SELECT * FROM programs ORDER BY code').fetchall()
+    original_email = user['email']
+    errors = {}
     if request.method == 'POST':
         full_name  = request.form.get('full_name', '').strip()
         email      = request.form.get('email', '').strip()
         role       = request.form.get('role', '')
         program    = request.form.get('program', '')
         year_level = request.form.get('year_level', '')
+        email_changed = email.lower() != (user['email'] or '').lower()
         if not all([full_name, email, role]):
             flash('Please fill in all required fields.', 'error')
         else:
-            try:
-                conn.execute("""
-                    UPDATE users SET full_name=?, email=?, role=?, program=?, year_level=?
-                    WHERE id=?
-                """, (full_name, email, role, program, year_level, user_id))
-                conn.commit()
-                flash(f'User {full_name} updated successfully!', 'success')
-                return redirect(url_for('admin_users'))
-            except sqlite3.IntegrityError:
-                flash('Email already exists for another user.', 'error')
+            # Only checked when the email is actually being changed, so existing
+            # accounts with an older address (e.g. the default admin) can still
+            # be edited without being forced onto the school domain.
+            if email_changed and not _is_allowed_signup_email(email):
+                errors['email'] = True   # the page turns the email field + hint red
+            if role == 'student':
+                if not program:
+                    errors['program'] = True
+                if not year_level:
+                    errors['year_level'] = True
+            if not errors:
+                try:
+                    conn.execute("""
+                        UPDATE users SET full_name=?, email=?, role=?, program=?, year_level=?
+                        WHERE id=?
+                    """, (full_name, email, role, program, year_level, user_id))
+                    conn.commit()
+                    flash(f'User {full_name} updated successfully!', 'success')
+                    return redirect(url_for('admin_users'))
+                except sqlite3.IntegrityError:
+                    flash('Email already exists for another user.', 'error')
+        # Failed: show the form again with what was typed, not the old saved values
+        user = {**dict(user), 'full_name': full_name, 'email': email, 'role': role,
+                'program': program, 'year_level': year_level}
     is_self = (user['id'] == session['user_id'])
-    return render_template('admin/edit_user.html', user=user, programs=programs, is_self=is_self)
+    return render_template('admin/edit_user.html', user=user, programs=programs, is_self=is_self,
+                           original_email=original_email, errors=errors)
 
 # ── Reset Password ──
 @app.route('/admin/users/reset-password/<int:user_id>', methods=['POST'])
