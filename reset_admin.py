@@ -8,7 +8,7 @@ Usage:
 """
 
 import sqlite3
-import hashlib
+from werkzeug.security import generate_password_hash
 import os
 import getpass
 
@@ -16,7 +16,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), 'instance', 'spark.db')
 
 
 def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+    return generate_password_hash(password)
 
 
 def main():
@@ -82,6 +82,10 @@ def main():
         "UPDATE users SET password=? WHERE id=?",
         (hash_password(new_pass), chosen['id'])
     )
+    try:
+        conn.execute("UPDATE users SET must_change_password=0 WHERE id=?", (chosen['id'],))
+    except sqlite3.OperationalError:
+        pass  # older database without the column
     conn.commit()
     conn.close()
 

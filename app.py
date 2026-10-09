@@ -1,6 +1,8 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, g, send_file
 import sqlite3
 import hashlib
+import hmac
+import secrets
 import os
 import random
 import string
@@ -14,9 +16,43 @@ import time
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = 'spark_secret_key_2027'
+
+_PW_ALPHABET = string.ascii_letters + string.digits
+INSTANCE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance')
+
+
+def _write_private_file(path, text):
+    """Write text to a file readable only by the current user (0600)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        f.write(text)
+
+
+def _load_secret_key():
+    """Session signing key. Never hardcoded in source.
+
+    Order: SPARK_SECRET_KEY env var -> instance/secret_key file -> generate a
+    new random key and save it to that file (so sessions survive restarts).
+    """
+    key = os.environ.get('SPARK_SECRET_KEY', '').strip()
+    if key:
+        return key
+    os.makedirs(INSTANCE_DIR, exist_ok=True)
+    path = os.path.join(INSTANCE_DIR, 'secret_key')
+    if os.path.exists(path):
+        with open(path) as f:
+            key = f.read().strip()
+        if key:
+            return key
+    key = secrets.token_hex(32)
+    _write_private_file(path, key)
+    return key
+
+
+app.secret_key = _load_secret_key()
 
 
 # Multiple-choice questions support up to 26 options, labeled A through Z.
@@ -451,12 +487,34 @@ def init_db():
     cursor.execute("INSERT OR IGNORE INTO programs (code, name) VALUES ('BSIT', 'Bachelor of Science in Information Technology')")
     cursor.execute("INSERT OR IGNORE INTO programs (code, name) VALUES ('BSCS', 'Bachelor of Science in Computer Science')")
 
-    # Default admin
-    admin_pw = hashlib.sha256('admin123'.encode()).hexdigest()
-    cursor.execute('''
-        INSERT OR IGNORE INTO users (full_name, email, password, role)
-        VALUES (?, ?, ?, ?)
-    ''', ('Administrator', 'admin@spark.edu', admin_pw, 'admin'))
+    # Migration: users.must_change_password (forces a password change at next login)
+    try:
+        conn.execute('ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0')
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
+
+    # First-run admin: only created when NO admin exists. It starts with the
+    # default password (admin123, or SPARK_ADMIN_PASSWORD if set) but is FLAGGED so
+    # the admin is forced to choose a new password right after the first login.
+    has_admin = cursor.execute("SELECT 1 FROM users WHERE role='admin' LIMIT 1").fetchone()
+    if not has_admin:
+        admin_plain = os.environ.get('SPARK_ADMIN_PASSWORD', '').strip() or 'admin123'
+        cursor.execute('''
+            INSERT INTO users (full_name, email, password, role, must_change_password)
+            VALUES (?, ?, ?, ?, 1)
+        ''', ('Administrator', 'admin@spark.edu', generate_password_hash(admin_plain), 'admin'))
+        conn.commit()
+        print("First run: admin account created -> admin@spark.edu "
+              "(password must be changed at first login).")
+    else:
+        # Existing DB: any admin still on the default password is forced to change it.
+        for a in cursor.execute("SELECT id, email, password FROM users WHERE role='admin'").fetchall():
+            if verify_password('admin123', a['password']):
+                cursor.execute('UPDATE users SET must_change_password=1 WHERE id=?', (a['id'],))
+                conn.commit()
+                print(f"NOTICE: admin '{a['email']}' still uses the default password; "
+                      "a password change will be required at next login.")
 
     # Migration: add tab_switch_enabled if it doesn't exist yet
     try:
@@ -957,7 +1015,24 @@ def background_maintenance_loop(interval_seconds=20):
         time.sleep(interval_seconds)
 
 def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Salted, slow hash (werkzeug scrypt by default)."""
+    return generate_password_hash(password)
+
+
+def _is_legacy_hash(stored):
+    """Old accounts used a bare unsalted SHA-256 hex digest (64 hex chars)."""
+    return bool(re.fullmatch(r'[0-9a-f]{64}', stored or ''))
+
+
+def verify_password(password, stored):
+    """Check a password against a stored hash. Still accepts legacy SHA-256
+    hashes so existing users can log in; login() upgrades them automatically."""
+    if not stored:
+        return False
+    if _is_legacy_hash(stored):
+        legacy = hashlib.sha256(password.encode()).hexdigest()
+        return hmac.compare_digest(legacy, stored)
+    return check_password_hash(stored, password)
 
 
 def validate_password_strength(password):
@@ -981,6 +1056,15 @@ def validate_password_strength(password):
     return None
 
 # ─── Auth Decorators ─────────────────────────────────────────────────────────
+
+@app.before_request
+def force_password_change():
+    """While the account is flagged, the only pages allowed are the profile
+    page (to change the password), logout, and static files."""
+    if session.get('user_id') and session.get('must_change_pw'):
+        if request.endpoint not in ('admin_profile', 'logout', 'static'):
+            flash('For security, you must change the default password before continuing.', 'error')
+            return redirect(url_for('admin_profile'))
 
 def login_required(f):
     @wraps(f)
@@ -1027,12 +1111,15 @@ def login():
             flash('Please fill in all fields.', 'error')
             return render_template('login.html', form=form)
         conn = get_db()
-        user = conn.execute(
-            'SELECT * FROM users WHERE email = ? AND password = ?',
-            (email, hash_password(password))
-        ).fetchone()
+        user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+        if user and not verify_password(password, user['password']):
+            user = None
         ip = request.remote_addr
         if user:
+            # Silently upgrade old unsalted SHA-256 hashes to the new format.
+            if _is_legacy_hash(user['password']):
+                conn.execute('UPDATE users SET password=? WHERE id=?',
+                             (hash_password(password), user['id']))
             conn.execute('INSERT INTO login_logs (user_id, email, success) VALUES (?,?,1)',
                          (user['id'], email))
             conn.commit()
@@ -1040,6 +1127,7 @@ def login():
             session['role'] = user['role']
             session['full_name'] = user['full_name']
             session['email'] = user['email']
+            session['must_change_pw'] = bool(user['must_change_password'])
             return redirect(url_for(f"{user['role']}_home"))
         else:
             conn.execute('INSERT INTO login_logs (email, success) VALUES (?,0)', (email,))
@@ -4251,23 +4339,28 @@ def admin_profile():
             for key, val in form.items():
                 if not val:
                     errors[key] = True
-        elif hash_password(current_password) != user['password']:
+        elif not verify_password(current_password, user['password']):
             flash('Current password is incorrect.', 'error')
             errors['current_password'] = True
         elif new_password != confirm_password:
             flash('New passwords do not match.', 'error')
             errors['confirm_password'] = True
+        elif new_password == current_password:
+            flash('New password must be different from the current password.', 'error')
+            errors['new_password'] = True
         else:
             pw_error = validate_password_strength(new_password)
             if pw_error:
                 flash(pw_error, 'error')
                 errors['new_password'] = True
             else:
-                conn.execute('UPDATE users SET password=? WHERE id=?',
+                was_forced = bool(session.get('must_change_pw'))
+                conn.execute('UPDATE users SET password=?, must_change_password=0 WHERE id=?',
                              (hash_password(new_password), session['user_id']))
                 conn.commit()
+                session.pop('must_change_pw', None)
                 flash('Password updated successfully.', 'success')
-                return redirect(url_for('admin_profile'))
+                return redirect(url_for('admin_home' if was_forced else 'admin_profile'))
 
     return render_template('admin/profile.html', user=user, form=form, errors=errors)
 

@@ -69,16 +69,17 @@ Open: **http://localhost:5000**
 
 ---
 
-## 🔑 Default Accounts
+## 🔑 First-Run Admin Account
 
-| Role    | Email              | Password   |
-|---------|--------------------|------------|
-| Admin   | admin@spark.edu    | hash  |
+On the first run the app creates `admin@spark.edu` with the default password `admin123`
+(or the value of `SPARK_ADMIN_PASSWORD`, if set). The admin is **forced to change the
+password immediately after the first login**; nothing else in the app is accessible until
+it is changed. Log in and set the new password **before connecting students to the network.**
+
+Lost the admin password? Run `python reset_admin.py`.
 
 > Teachers and students are created via Admin → User Management,
 > or students can self-register at `/signup`.
-
----
 
 ## ✨ Features
 
@@ -108,6 +109,8 @@ Open: **http://localhost:5000**
 
 ## 🔒 Security Notes
 
-- Passwords hashed with SHA-256 (no salt — upgrade to `bcrypt` for production)
-- Secret key should be changed before deploying
-- SQLite is fine for development; use PostgreSQL for production
+- Session secret key: read from `SPARK_SECRET_KEY`, otherwise auto-generated once and
+  stored in `instance/secret_key` (never commit `instance/`)
+- Passwords use salted scrypt hashes (werkzeug). Old SHA-256 hashes are upgraded
+  automatically the next time that user logs in
+- SQLite is fine for a single-server local classroom network
