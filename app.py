@@ -10,7 +10,7 @@ import json
 import re
 import io
 from functools import wraps
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 import time
 from openpyxl import Workbook, load_workbook
@@ -461,6 +461,11 @@ def init_db():
             email TEXT UNIQUE NOT NULL,
             added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
     ''')
 
     # Indexes on the columns hit hardest by exam-time traffic (heartbeat, answer
@@ -490,6 +495,18 @@ def init_db():
     # Migration: users.must_change_password (forces a password change at next login)
     try:
         conn.execute('ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0')
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
+
+    # Migration: account lockout bookkeeping
+    try:
+        conn.execute('ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0')
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
+    try:
+        conn.execute('ALTER TABLE users ADD COLUMN locked_until TIMESTAMP')
         conn.commit()
     except Exception:
         pass  # Column already exists
@@ -1055,6 +1072,47 @@ def validate_password_strength(password):
                 'uppercase letters, numbers.')
     return None
 
+# ─── System Settings (key/value store, admin-editable) ──────────────────────
+
+SETTINGS_DEFAULTS = {
+    'system_name': 'SPARK Exam System',
+    'school_year': '2025-2026',
+    'semester': '1st',
+    'allow_signup': '1',
+    'allow_teacher_signup': '1',
+    'lockout_max_attempts': '5',
+    'lockout_duration_minutes': '15',
+}
+
+
+def get_settings():
+    """Current system settings as a dict, with defaults filled in for any
+    key that hasn't been saved yet. Booleans/ints are already converted."""
+    conn = get_db()
+    rows = conn.execute('SELECT key, value FROM settings').fetchall()
+    raw = {**SETTINGS_DEFAULTS, **{r['key']: r['value'] for r in rows}}
+    return {
+        'system_name': raw['system_name'],
+        'school_year': raw['school_year'],
+        'semester': raw['semester'],
+        'allow_signup': raw['allow_signup'] == '1',
+        'allow_teacher_signup': raw['allow_teacher_signup'] == '1',
+        'lockout_max_attempts': int(raw['lockout_max_attempts']),
+        'lockout_duration_minutes': int(raw['lockout_duration_minutes']),
+    }
+
+
+def set_settings(values):
+    """values: {key: value} — saves/overwrites each key."""
+    conn = get_db()
+    for key, value in values.items():
+        conn.execute(
+            'INSERT INTO settings (key, value) VALUES (?, ?) '
+            'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+            (key, str(value))
+        )
+    conn.commit()
+
 # ─── Auth Decorators ─────────────────────────────────────────────────────────
 
 @app.before_request
@@ -1100,6 +1158,7 @@ def index():
 def login():
     if 'user_id' in session:
         return redirect(url_for(f"{session['role']}_home"))
+    page_settings = get_settings()
     form = {}
     if request.method == 'POST':
         email = request.form.get('email', '').strip()
@@ -1109,17 +1168,38 @@ def login():
         form = {'email': email}
         if not email or not password:
             flash('Please fill in all fields.', 'error')
-            return render_template('login.html', form=form)
+            return render_template('login.html', form=form, settings=page_settings)
         conn = get_db()
-        user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+        account = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+
+        # Account lockout: if this account is currently locked out, refuse
+        # the attempt before even checking the password, and don't restart
+        # the clock — that would let someone keep the account locked forever
+        # just by repeatedly trying.
+        if account and account['locked_until']:
+            locked_until = datetime.strptime(account['locked_until'], '%Y-%m-%d %H:%M:%S.%f') \
+                if '.' in account['locked_until'] else datetime.strptime(account['locked_until'], '%Y-%m-%d %H:%M:%S')
+            if locked_until > datetime.now():
+                minutes_left = max(1, int((locked_until - datetime.now()).total_seconds() // 60) + 1)
+                conn.execute('INSERT INTO login_logs (user_id, email, success) VALUES (?,?,0)',
+                             (account['id'], email))
+                conn.commit()
+                flash(f'This account is locked due to too many failed login attempts. '
+                      f'Try again in {minutes_left} minute(s).', 'error')
+                return render_template('login.html', form=form, settings=page_settings)
+
+        user = account
         if user and not verify_password(password, user['password']):
             user = None
-        ip = request.remote_addr
+
         if user:
             # Silently upgrade old unsalted SHA-256 hashes to the new format.
             if _is_legacy_hash(user['password']):
                 conn.execute('UPDATE users SET password=? WHERE id=?',
                              (hash_password(password), user['id']))
+            # Successful login clears any lockout bookkeeping.
+            conn.execute('UPDATE users SET failed_login_attempts=0, locked_until=NULL WHERE id=?',
+                         (user['id'],))
             conn.execute('INSERT INTO login_logs (user_id, email, success) VALUES (?,?,1)',
                          (user['id'], email))
             conn.commit()
@@ -1131,9 +1211,27 @@ def login():
             return redirect(url_for(f"{user['role']}_home"))
         else:
             conn.execute('INSERT INTO login_logs (email, success) VALUES (?,0)', (email,))
-            conn.commit()
-            flash('Invalid email or password.', 'error')
-    return render_template('login.html', form=form)
+            if account:
+                settings = get_settings()
+                attempts = (account['failed_login_attempts'] or 0) + 1
+                if attempts >= settings['lockout_max_attempts']:
+                    locked_until = datetime.now() + timedelta(minutes=settings['lockout_duration_minutes'])
+                    conn.execute('UPDATE users SET failed_login_attempts=?, locked_until=? WHERE id=?',
+                                 (attempts, locked_until.strftime('%Y-%m-%d %H:%M:%S'), account['id']))
+                    conn.commit()
+                    flash(f'Too many failed attempts. This account is now locked for '
+                          f'{settings["lockout_duration_minutes"]} minute(s).', 'error')
+                else:
+                    conn.execute('UPDATE users SET failed_login_attempts=? WHERE id=?',
+                                 (attempts, account['id']))
+                    conn.commit()
+                    remaining = settings['lockout_max_attempts'] - attempts
+                    flash(f'Invalid email or password. {remaining} attempt(s) remaining before '
+                          f'this account is locked.', 'error')
+            else:
+                conn.commit()
+                flash('Invalid email or password.', 'error')
+    return render_template('login.html', form=form, settings=page_settings)
 
 ALLOWED_SIGNUP_EMAIL_DOMAIN = '@psu.palawan.edu.ph'
 
@@ -1171,6 +1269,9 @@ def _validate_signup_form(form, required):
 def signup():
     if 'user_id' in session:
         return redirect(url_for(f"{session['role']}_home"))
+    if not get_settings()['allow_signup']:
+        flash('Student self-registration is currently disabled. Please contact your admin to have an account created.', 'error')
+        return redirect(url_for('login'))
     conn = get_db()
     programs = conn.execute('SELECT * FROM programs ORDER BY code').fetchall()
     form, errors = {}, {}
@@ -1204,6 +1305,9 @@ def signup():
 def signup_teacher():
     if 'user_id' in session:
         return redirect(url_for(f"{session['role']}_home"))
+    if not get_settings()['allow_teacher_signup']:
+        flash('Teacher self-registration is currently disabled. Please contact your admin to have an account created.', 'error')
+        return redirect(url_for('login'))
     form, errors = {}, {}
     if request.method == 'POST':
         form = {
@@ -4293,10 +4397,44 @@ def admin_logs():
     ''').fetchall()
     return render_template('admin/logs.html', login_logs=login_logs, suspicious=suspicious)
 
-@app.route('/admin/settings')
+@app.route('/admin/settings', methods=['GET', 'POST'])
 @role_required('admin')
 def admin_settings():
     conn = get_db()
+
+    if request.method == 'POST':
+        section = request.form.get('section', '')
+        if section == 'general':
+            set_settings({
+                'system_name': request.form.get('system_name', '').strip() or SETTINGS_DEFAULTS['system_name'],
+                'school_year': request.form.get('school_year', '').strip() or SETTINGS_DEFAULTS['school_year'],
+                'semester': request.form.get('semester', '').strip() or SETTINGS_DEFAULTS['semester'],
+            })
+            flash('General settings saved.', 'success')
+        elif section == 'security':
+            set_settings({
+                'allow_signup': '1' if request.form.get('allow_signup') == '1' else '0',
+                'allow_teacher_signup': '1' if request.form.get('allow_teacher_signup') == '1' else '0',
+            })
+            flash('Security settings saved.', 'success')
+        elif section == 'lockout':
+            try:
+                max_attempts = int(request.form.get('lockout_max_attempts', 5))
+            except ValueError:
+                max_attempts = 5
+            try:
+                duration = int(request.form.get('lockout_duration_minutes', 15))
+            except ValueError:
+                duration = 15
+            max_attempts = min(max(max_attempts, 3), 20)
+            duration = min(max(duration, 1), 1440)
+            set_settings({
+                'lockout_max_attempts': max_attempts,
+                'lockout_duration_minutes': duration,
+            })
+            flash('Account lockout policy saved.', 'success')
+        return redirect(url_for('admin_settings'))
+
     db_size = '—'
     try:
         size_bytes = os.path.getsize(DB_PATH)
@@ -4317,7 +4455,8 @@ def admin_settings():
         'sessions': conn.execute("SELECT COUNT(*) FROM exam_sessions").fetchone()[0],
         'logins': conn.execute("SELECT COUNT(*) FROM login_logs").fetchone()[0],
     }
-    return render_template('admin/settings.html', db_size=db_size, record_counts=record_counts)
+    return render_template('admin/settings.html', db_size=db_size, record_counts=record_counts,
+                            settings=get_settings())
 
 @app.route('/admin/profile', methods=['GET', 'POST'])
 @role_required('admin')
@@ -4466,8 +4605,16 @@ def admin_edit_user(user_id):
         user = {**dict(user), 'full_name': full_name, 'email': email, 'role': role,
                 'program': program, 'year_level': year_level}
     is_self = (user['id'] == session['user_id'])
+    locked_until_raw = user['locked_until']
+    is_locked = False
+    if locked_until_raw:
+        try:
+            fmt = '%Y-%m-%d %H:%M:%S.%f' if '.' in locked_until_raw else '%Y-%m-%d %H:%M:%S'
+            is_locked = datetime.strptime(locked_until_raw, fmt) > datetime.now()
+        except ValueError:
+            is_locked = False
     return render_template('admin/edit_user.html', user=user, programs=programs, is_self=is_self,
-                           original_email=original_email, errors=errors)
+                           original_email=original_email, errors=errors, is_locked=is_locked)
 
 # ── Reset Password ──
 @app.route('/admin/users/reset-password/<int:user_id>', methods=['POST'])
@@ -4486,6 +4633,20 @@ def admin_reset_password(user_id):
     conn.execute('UPDATE users SET password=? WHERE id=?', (hash_password(new_password), user_id))
     conn.commit()
     flash(f'Password reset for {user["full_name"]}. New password: {new_password}', 'success')
+    return redirect(url_for('admin_edit_user', user_id=user_id))
+
+# ── Unlock Account (clears a lockout from too many failed login attempts) ──
+@app.route('/admin/users/unlock/<int:user_id>', methods=['POST'])
+@role_required('admin')
+def admin_unlock_user(user_id):
+    conn = get_db()
+    user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('admin_users'))
+    conn.execute('UPDATE users SET failed_login_attempts=0, locked_until=NULL WHERE id=?', (user_id,))
+    conn.commit()
+    flash(f'{user["full_name"]}\'s account has been unlocked.', 'success')
     return redirect(url_for('admin_edit_user', user_id=user_id))
 
 # ── Exam Analytics ──

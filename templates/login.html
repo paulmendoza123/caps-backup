@@ -60,10 +60,20 @@
       </button>
     </form>
 
+    {% if settings is not defined or settings.allow_signup or settings.allow_teacher_signup %}
     <div class="auth-footer">
       Don't have an account?<br>
-      <a href="{{ url_for('signup') }}">Sign up as Student</a> · <a href="{{ url_for('signup_teacher') }}">Sign up as Teacher</a>
+      {% if settings is not defined or settings.allow_signup %}
+      <a href="{{ url_for('signup') }}">Sign up as Student</a>
+      {% endif %}
+      {% if settings is not defined or (settings.allow_signup and settings.allow_teacher_signup) %}
+      ·
+      {% endif %}
+      {% if settings is not defined or settings.allow_teacher_signup %}
+      <a href="{{ url_for('signup_teacher') }}">Sign up as Teacher</a>
+      {% endif %}
     </div>
+    {% endif %}
   </div>
 </div>
 {% endblock %}
