@@ -1072,6 +1072,49 @@ def validate_password_strength(password):
                 'uppercase letters, numbers.')
     return None
 
+def handle_password_change(conn, user):
+    """Shared "Change Password" form handler for the teacher / student profile
+    pages (same rules as the admin profile page).
+
+    Returns (form, errors, success). On success the password is updated and
+    `success` is True; otherwise an error is flashed and `errors` marks the
+    offending fields so the template can highlight them.
+    """
+    current_password = request.form.get('current_password', '')
+    new_password = request.form.get('new_password', '')
+    confirm_password = request.form.get('confirm_password', '')
+    # Keep what was typed so a failed attempt doesn't wipe the form
+    form = {'current_password': current_password, 'new_password': new_password,
+            'confirm_password': confirm_password}
+    errors = {}
+
+    if not all([current_password, new_password, confirm_password]):
+        flash('Please fill in all password fields.', 'error')
+        for key, val in form.items():
+            if not val:
+                errors[key] = True
+    elif not verify_password(current_password, user['password']):
+        flash('Current password is incorrect.', 'error')
+        errors['current_password'] = True
+    elif new_password != confirm_password:
+        flash('New passwords do not match.', 'error')
+        errors['confirm_password'] = True
+    elif new_password == current_password:
+        flash('New password must be different from the current password.', 'error')
+        errors['new_password'] = True
+    else:
+        pw_error = validate_password_strength(new_password)
+        if pw_error:
+            flash(pw_error, 'error')
+            errors['new_password'] = True
+        else:
+            conn.execute('UPDATE users SET password=?, must_change_password=0 WHERE id=?',
+                         (hash_password(new_password), user['id']))
+            conn.commit()
+            flash('Password updated successfully.', 'success')
+            return {}, {}, True
+    return form, errors, False
+
 # ─── System Settings (key/value store, admin-editable) ──────────────────────
 
 SETTINGS_DEFAULTS = {
@@ -1822,11 +1865,16 @@ def student_exam_result(exam_id):
 
     return render_template('student/exam_result.html', exam=exam, exam_session=exam_sess, questions=questions, class_id=exam['class_id'], exam_closed=exam_closed)
 
-@app.route('/student/profile')
+@app.route('/student/profile', methods=['GET', 'POST'])
 @role_required('student')
 def student_profile():
     conn = get_db()
     user = conn.execute('SELECT * FROM users WHERE id=?', (session['user_id'],)).fetchone()
+    form, errors = {}, {}
+    if request.method == 'POST':
+        form, errors, ok = handle_password_change(conn, user)
+        if ok:
+            return redirect(url_for('student_profile'))
     exam_history = conn.execute('''
         SELECT es.*, e.title as exam_title, e.status as exam_status,
                c.subject_name, c.block_name, e.passing_score,
@@ -1853,7 +1901,8 @@ def student_profile():
         GROUP BY c.id
         ORDER BY c.is_active DESC, c.created_at DESC
     ''', (session['user_id'],)).fetchall()
-    return render_template('student/profile.html', user=user, exam_history=exam_history, enrolled_classes=enrolled_classes)
+    return render_template('student/profile.html', user=user, exam_history=exam_history, enrolled_classes=enrolled_classes,
+                           form=form, errors=errors)
 
 # ─── Teacher Routes ───────────────────────────────────────────────────────────
 
@@ -4130,11 +4179,16 @@ def teacher_question_bank():
 
     return render_template('teacher/question_bank.html', questions=questions, bank_sections=bank_sections, bank_groups=bank_groups, teacher_classes=teacher_classes)
 
-@app.route('/teacher/profile')
+@app.route('/teacher/profile', methods=['GET', 'POST'])
 @role_required('teacher')
 def teacher_profile():
     conn = get_db()
     user = conn.execute('SELECT * FROM users WHERE id=?', (session['user_id'],)).fetchone()
+    form, errors = {}, {}
+    if request.method == 'POST':
+        form, errors, ok = handle_password_change(conn, user)
+        if ok:
+            return redirect(url_for('teacher_profile'))
     exam_history = conn.execute('''
         SELECT e.*, c.subject_name, c.block_name,
                COUNT(DISTINCT es.id) as total_takers,
@@ -4178,7 +4232,8 @@ def teacher_profile():
             'total': row['total_answered'] or 0,
             'correct': row['correct_count'] or 0,
         })
-    return render_template('teacher/profile.html', user=user, exam_history=exam_history, exam_questions=exam_questions)
+    return render_template('teacher/profile.html', user=user, exam_history=exam_history, exam_questions=exam_questions,
+                           form=form, errors=errors)
 
 # ─── Admin Routes ─────────────────────────────────────────────────────────────
 

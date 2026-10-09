@@ -1451,3 +1451,22 @@ div[style*="display: flex"][style*="gap"] .stat-card {
 }
 
 
+
+/* ── My Profile pages (admin / teacher / student) ──
+   Account Information + Change Password: two equal columns that fill the
+   full content width; stack into one column on tablets / phones. */
+.profile-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+}
+@media (max-width: 1000px) {
+  .profile-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}
+
+/* Lets a page use the full content width instead of the 1200px cap
+   (used by the My Profile pages). */
+.page-body.page-body-wide {
+  max-width: none;
+}
