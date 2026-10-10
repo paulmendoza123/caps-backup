@@ -40,7 +40,7 @@
             <th>User</th>
             <th>Email</th>
             <th>Result</th>
-                        <th>Time</th>
+            <th>Time</th>
           </tr>
         </thead>
         <tbody>
@@ -55,12 +55,14 @@
                 <span class="badge badge-red">Failed</span>
               {% endif %}
             </td>
-                        <td class="text-sm text-muted">{{ log.logged_at }}</td>
+            <td class="text-sm text-muted">{{ log.logged_at }}</td>
           </tr>
           {% endfor %}
+          <tr id="login-empty" style="display:none">
+            <td colspan="4" style="text-align:center;padding:2rem;color:var(--text2)">No records match your filters.</td>
+          </tr>
         </tbody>
       </table>
-      </div>
     </div>
   </div>
   {% else %}
@@ -78,14 +80,18 @@
   <div class="card mb-2">
     <div class="flex gap-2" style="flex-wrap:wrap;align-items:center">
       <input type="text" id="sus-search" class="form-control" placeholder="Search by student or exam…" style="flex:1;min-width:180px" />
-      <select id="sus-event-filter" class="form-select" style="width:auto;min-width:140px">
+      <select id="sus-event-filter" class="form-select" style="width:auto;min-width:170px">
         <option value="">All Events</option>
         <option value="tab_switch">Tab Switch</option>
         <option value="lost_focus">Lost Focus</option>
+        <option value="fullscreen_exit">Exited Fullscreen</option>
       </select>
     </div>
   </div>
-  <div class="flex gap-2 mb-2">
+  <div class="flex gap-2 mb-2" style="flex-wrap:wrap">
+    <span class="badge badge-yellow" id="sus-tab-count">0 Tab Switch</span>
+    <span class="badge badge-orange" id="sus-focus-count">0 Lost Focus</span>
+    <span class="badge badge-red" id="sus-fs-count">0 Exited Fullscreen</span>
     <span class="badge badge-gray" id="sus-visible-count">Showing all</span>
   </div>
   <div class="card">
@@ -101,14 +107,22 @@
         </thead>
         <tbody>
           {% for log in suspicious %}
-          <tr data-name="{{ log.full_name|lower }}" data-exam="{{ log.exam_title|lower }}" data-event="{{ log.event_type }}">
+          {# Normalise the stored event type into the filter groups #}
+          {% if log.event_type in ('lost_focus', 'window_minimize', 'window_blur') %}
+            {% set ev = 'lost_focus' %}
+          {% else %}
+            {% set ev = log.event_type %}
+          {% endif %}
+          <tr data-name="{{ (log.full_name or '')|lower }}" data-exam="{{ (log.exam_title or '')|lower }}" data-event="{{ ev }}">
             <td class="fw-600">{{ log.full_name }}</td>
             <td class="text-sm">{{ log.exam_title }}</td>
             <td>
-              {% if log.event_type == 'tab_switch' %}
+              {% if ev == 'tab_switch' %}
                 <span class="badge badge-yellow">Tab Switch</span>
-              {% elif log.event_type == 'lost_focus' or log.event_type == 'window_minimize' or log.event_type == 'window_blur' %}
+              {% elif ev == 'lost_focus' %}
                 <span class="badge badge-orange">Lost Focus</span>
+              {% elif ev == 'fullscreen_exit' %}
+                <span class="badge badge-red">Exited Fullscreen</span>
               {% else %}
                 <span class="badge badge-gray">{{ log.event_type }}</span>
               {% endif %}
@@ -116,9 +130,11 @@
             <td class="text-sm text-muted font-mono">{{ log.logged_at }}</td>
           </tr>
           {% endfor %}
+          <tr id="sus-empty" style="display:none">
+            <td colspan="4" style="text-align:center;padding:2rem;color:var(--text2)">No events match your filters.</td>
+          </tr>
         </tbody>
       </table>
-      </div>
     </div>
   </div>
   {% else %}
@@ -144,7 +160,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 (function() {
   const search = document.getElementById('login-search');
   const resultFilter = document.getElementById('login-result-filter');
-  const rows = document.querySelectorAll('#login-table tbody tr');
+  const rows = document.querySelectorAll('#login-table tbody tr[data-result]');
   if (!rows.length) return;
 
   let sCount = 0, fCount = 0;
@@ -163,6 +179,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
       r.style.display = show ? '' : 'none';
       if (show) vis++;
     });
+    document.getElementById('login-empty').style.display = vis ? 'none' : '';
     document.getElementById('login-visible-count').textContent = 'Showing ' + vis + ' of ' + rows.length;
   }
   search.addEventListener('input', filter);
@@ -174,11 +191,18 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 (function() {
   const search = document.getElementById('sus-search');
   const eventFilter = document.getElementById('sus-event-filter');
-  const rows = document.querySelectorAll('#sus-table tbody tr');
+  const rows = document.querySelectorAll('#sus-table tbody tr[data-event]');
   if (!rows.length) return;
 
+  // Per-type totals
+  const totals = { tab_switch: 0, lost_focus: 0, fullscreen_exit: 0 };
+  rows.forEach(r => { if (r.dataset.event in totals) totals[r.dataset.event]++; });
+  document.getElementById('sus-tab-count').textContent = totals.tab_switch + ' Tab Switch';
+  document.getElementById('sus-focus-count').textContent = totals.lost_focus + ' Lost Focus';
+  document.getElementById('sus-fs-count').textContent = totals.fullscreen_exit + ' Exited Fullscreen';
+
   function filter() {
-    const q = search.value.toLowerCase();
+    const q = search.value.trim().toLowerCase();
     const ev = eventFilter.value;
     let vis = 0;
     rows.forEach(r => {
@@ -188,6 +212,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
       r.style.display = show ? '' : 'none';
       if (show) vis++;
     });
+    document.getElementById('sus-empty').style.display = vis ? 'none' : '';
     document.getElementById('sus-visible-count').textContent = 'Showing ' + vis + ' of ' + rows.length;
   }
   search.addEventListener('input', filter);

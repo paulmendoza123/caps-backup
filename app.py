@@ -4514,6 +4514,8 @@ def admin_logs():
         FROM suspicious_logs sl
         JOIN users u ON sl.student_id = u.id
         JOIN exams e ON sl.exam_id = e.id
+        WHERE sl.event_type IN ('tab_switch', 'lost_focus', 'window_minimize',
+                                'window_blur', 'fullscreen_exit')
         ORDER BY sl.logged_at DESC LIMIT 100
     ''').fetchall()
     return render_template('admin/logs.html', login_logs=login_logs, suspicious=suspicious)
