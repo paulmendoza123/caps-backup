@@ -545,6 +545,14 @@ def init_db():
     except Exception:
         pass  # Column already exists
 
+    # Migration: add is_ready flag. New exams start as drafts (is_ready=0) and are
+    # never auto-opened by the scheduler until the teacher clicks "Finish editing".
+    try:
+        conn.execute('ALTER TABLE exams ADD COLUMN is_ready INTEGER DEFAULT 0')
+        conn.execute('UPDATE exams SET is_ready=1')  # existing exams keep current behavior
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
     # Migration: add manually_closed flag to prevent auto-scheduler from re-opening
     try:
         conn.execute('ALTER TABLE exams ADD COLUMN manually_closed INTEGER DEFAULT 0')
@@ -983,6 +991,8 @@ def auto_activate_scheduled_exams(conn):
               AND (manually_closed = 0 OR manually_closed IS NULL)
               AND scheduled_at IS NOT NULL
               AND scheduled_at != ''
+              AND is_ready = 1
+              AND EXISTS (SELECT 1 FROM questions q WHERE q.exam_id = exams.id)
               AND substr(replace(scheduled_at, 'T', ' '), 1, 10) = ?
               AND substr(replace(scheduled_at, 'T', ' '), 1, 16) <= ?
         """, (today_str, now_str))
@@ -3022,13 +3032,51 @@ def teacher_toggle_exam_status(exam_id):
     new_status = 'active' if exam['status'] == 'upcoming' else 'upcoming'
     if new_status == 'active':
         # Reset activated_at fresh every time the exam is opened — timer always starts from now
-        conn.execute("UPDATE exams SET status=?, manually_closed=0, activated_at=strftime('%Y-%m-%d %H:%M:%S','now','localtime') WHERE id=?", (new_status, exam_id))
+        conn.execute("UPDATE exams SET status=?, is_ready=1, manually_closed=0, activated_at=strftime('%Y-%m-%d %H:%M:%S','now','localtime') WHERE id=?", (new_status, exam_id))
     else:
         # Clear activated_at on close so the next open always gets a fresh timer
         conn.execute("UPDATE exams SET status=?, manually_closed=1, activated_at=NULL WHERE id=?", (new_status, exam_id))
     conn.commit()
     flash(f"Exam is now {'Open' if new_status == 'active' else 'Closed'}.", 'success')
     return redirect(url_for('teacher_class_detail', class_id=class_id))
+
+@app.route('/teacher/exam/<int:exam_id>/finish-editing', methods=['POST'])
+@role_required('teacher')
+def teacher_finish_editing(exam_id):
+    """Teacher is done building the exam: allow the scheduler to open it."""
+    conn = get_db()
+    exam = conn.execute('''
+        SELECT e.*, c.teacher_id FROM exams e JOIN classes c ON e.class_id = c.id WHERE e.id=?
+    ''', (exam_id,)).fetchone()
+    if not exam or int(exam['teacher_id']) != int(session['user_id']):
+        flash('Exam not found.', 'error')
+        return redirect(url_for('teacher_home'))
+    has_q = conn.execute('SELECT 1 FROM questions WHERE exam_id=? LIMIT 1', (exam_id,)).fetchone()
+    if not has_q:
+        flash('Add at least one question before finishing.', 'error')
+        return redirect(url_for('teacher_exam_detail', exam_id=exam_id))
+    # If the schedule is current or already past, open the exam immediately
+    # (timer starts now). A future schedule stays Upcoming and the scheduler opens it.
+    schedule_arrived = False
+    if exam['scheduled_at']:
+        raw = str(exam['scheduled_at']).replace('T', ' ')[:16]
+        try:
+            schedule_arrived = datetime.strptime(raw, '%Y-%m-%d %H:%M') <= datetime.now()
+        except ValueError:
+            schedule_arrived = False
+    if schedule_arrived and exam['status'] == 'upcoming':
+        conn.execute("""UPDATE exams SET status='active', is_ready=1, manually_closed=0,
+                        activated_at=strftime('%Y-%m-%d %H:%M:%S','now','localtime') WHERE id=?""", (exam_id,))
+        conn.commit()
+        flash('Exam is ready and now Open for students.', 'success')
+        return redirect(url_for('teacher_class_detail', class_id=exam['class_id']))
+    conn.execute('UPDATE exams SET is_ready=1, manually_closed=0 WHERE id=?', (exam_id,))
+    conn.commit()
+    if exam['scheduled_at']:
+        flash('Exam is ready. It will open automatically at its scheduled time.', 'success')
+    else:
+        flash('Exam is ready. Open it from the class page when you want students to start.', 'success')
+    return redirect(url_for('teacher_class_detail', class_id=exam['class_id']))
 
 @app.route('/teacher/class/<int:class_id>/monitoring')
 @role_required('teacher')
@@ -3136,7 +3184,7 @@ def teacher_exam_settings(exam_id):
             conn.execute('''
                 UPDATE exams SET title=?, duration_minutes=?, scheduled_at=?, show_results=?,
                 randomize_questions=?, tab_switch_limit=?, tab_switch_enabled=?, fullscreen_required=?, status=?, passing_score=?,
-                manually_closed=0, activated_at=strftime('%Y-%m-%d %H:%M:%S','now','localtime') WHERE id=?
+                manually_closed=0, is_ready=1, activated_at=strftime('%Y-%m-%d %H:%M:%S','now','localtime') WHERE id=?
             ''', (title, duration, new_scheduled_at, show_results, randomize, tab_limit, tab_switch_enabled, fullscreen_required, status, passing_score, exam_id))
         elif status == 'upcoming' and existing_status == 'active':
             # Clear activated_at on close so next open always gets a fresh timer
@@ -3171,7 +3219,14 @@ def _exam_locked_response(exam_id):
     row = get_db().execute('SELECT status, class_id FROM exams WHERE id=?', (exam_id,)).fetchone()
     if not row or row['status'] != 'active':
         return None
-    msg = 'This exam is open. Close it first before editing.'
+    # Only lock once a student has actually started/taken the exam. An open exam
+    # nobody has entered yet (e.g. auto-opened by its schedule while the teacher
+    # is still building it) is safe to keep editing.
+    has_sessions = get_db().execute(
+        'SELECT 1 FROM exam_sessions WHERE exam_id=? LIMIT 1', (exam_id,)).fetchone()
+    if not has_sessions:
+        return None
+    msg = 'A student has already started this exam, so it can\'t be edited. Close it first.'
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
         return jsonify({'ok': False, 'error': msg}), 409
     flash(msg, 'error')
