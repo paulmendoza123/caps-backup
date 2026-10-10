@@ -28,7 +28,6 @@ spark/
     │   ├── exams.html
     │   ├── take_exam.html        # Live exam with timer + tab detection
     │   ├── exam_result.html      # Score + answer review
-    │   ├── exam_terminated.html
     │   └── profile.html
     ├── teacher/
     │   ├── classes.html

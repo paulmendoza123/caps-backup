@@ -450,18 +450,6 @@ def init_db():
             FOREIGN KEY (teacher_id) REFERENCES users(id)
         );
 
-        CREATE TABLE IF NOT EXISTS allowed_student_emails (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS allowed_teacher_emails (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -532,6 +520,16 @@ def init_db():
                 conn.commit()
                 print(f"NOTICE: admin '{a['email']}' still uses the default password; "
                       "a password change will be required at next login.")
+
+    # Migration: drop the unused allowed_*_emails tables (no code ever used them).
+    # Only dropped when empty, so no data can be lost.
+    for _t in ('allowed_student_emails', 'allowed_teacher_emails'):
+        try:
+            if conn.execute(f'SELECT COUNT(*) FROM {_t}').fetchone()[0] == 0:
+                conn.execute(f'DROP TABLE {_t}')
+                conn.commit()
+        except Exception:
+            pass  # Table already gone
 
     # Migration: add tab_switch_enabled if it doesn't exist yet
     try:
