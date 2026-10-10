@@ -3841,7 +3841,27 @@ def teacher_bank_import_file():
         r'^(multiple\s*choice|short\s*answer|fill\s*in\s*the\s*blank|true\s*/?\s*false|essay)\s*:?\s*$',
         _re.IGNORECASE
     )
-    _FENCE_RE = _re.compile(r"^(```|''')")
+    # Code-block markers are auto-detected: ```  '''  or """ (Word's curly-quote
+    # versions of ''' and """ count too). A block closes only with the SAME
+    # marker that opened it, so e.g. a """ docstring inside a ``` block is
+    # kept as code instead of ending the block early.
+    _FENCE_KINDS = (
+        ('backticks', _re.compile(r"^```")),
+        ('single', _re.compile(r"^(?:'''|[\u2018\u2019]{3})")),
+        ('double', _re.compile(r'^(?:"""|[\u201c\u201d]{3})')),
+    )
+
+    def _fence_step(line, open_kind):
+        """Returns (is_fence_line, new_open_kind)."""
+        for kind, rx in _FENCE_KINDS:
+            if rx.match(line):
+                if not open_kind:
+                    return True, kind        # opens a block
+                if open_kind == kind:
+                    return True, None        # closes it
+                return False, open_kind      # other marker inside code: just text
+        return False, open_kind
+
     _RUBRIC_HEADER_RE = _re.compile(r'^rubric\s*:?\s*$', _re.IGNORECASE)
     _RUBRIC_ITEM_RE = _re.compile(r'^-?\s*(.+?)\s*:\s*(\d+(?:\.\d+)?)\s*(?:pts?|points?)?\s*$', _re.IGNORECASE)
 
@@ -3853,8 +3873,8 @@ def teacher_bank_import_file():
     in_fence = False
     for l in lines:
         s = l.strip()
-        if _FENCE_RE.match(s):
-            in_fence = not in_fence
+        _is_fence, in_fence = _fence_step(s, in_fence)
+        if _is_fence:
             filtered.append(l)
             continue
         if in_fence or not _HEADER_RE.match(s):
@@ -3870,8 +3890,8 @@ def teacher_bank_import_file():
     in_fence = False
     for line in lines:
         stripped = line.strip()
-        if _FENCE_RE.match(stripped):
-            in_fence = not in_fence
+        _is_fence, in_fence = _fence_step(stripped, in_fence)
+        if _is_fence:
             current_block.append(line)
             continue
         if in_fence:
@@ -3909,8 +3929,8 @@ def teacher_bank_import_file():
         in_fence = False
         for bline in block[1:]:
             stripped_b = bline.strip()
-            if _FENCE_RE.match(stripped_b):
-                in_fence = not in_fence
+            _is_fence, in_fence = _fence_step(stripped_b, in_fence)
+            if _is_fence:
                 continue  # don't keep the ``` markers themselves
             if in_fence:
                 question_lines.append(bline)  # preserve original indentation
