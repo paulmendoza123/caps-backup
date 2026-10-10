@@ -62,7 +62,12 @@
           <td class="font-mono text-sm">{{ exam.session_count }}</td>
           <td class="text-sm text-muted">{{ exam.scheduled_at or '—' }}</td>
           <td>
+            {% if exam.status == 'active' %}
+            <button type="button" class="btn btn-ghost btn-sm" disabled
+                    title="Close the exam before editing" style="opacity:0.5;cursor:not-allowed">Open</button>
+            {% else %}
             <a href="{{ url_for('teacher_exam_detail', exam_id=exam.id) }}" class="btn btn-ghost btn-sm">Open</a>
+            {% endif %}
           </td>
         </tr>
         {% endfor %}

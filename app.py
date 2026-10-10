@@ -2326,6 +2326,9 @@ def teacher_exam_detail(exam_id):
     if not exam or int(exam["teacher_id"]) != int(session["user_id"]):
         flash('Exam not found.', 'error')
         return redirect(url_for('teacher_home'))
+    locked = _exam_locked_response(exam_id)
+    if locked:
+        return locked
     sections = conn.execute('SELECT * FROM sections WHERE exam_id=? ORDER BY order_index', (exam_id,)).fetchall()
     section_data = []
     for sec in sections:
@@ -3084,6 +3087,9 @@ def teacher_exam_settings(exam_id):
     if not exam or int(exam["teacher_id"]) != int(session["user_id"]):
         flash('Exam not found.', 'error')
         return redirect(url_for('teacher_home'))
+    locked = _exam_locked_response(exam_id)
+    if locked:
+        return locked
     if request.method == 'POST':
         action = request.form.get('action')
         if action == 'delete':
@@ -3158,6 +3164,21 @@ def teacher_exam_settings(exam_id):
         ''', (exam_id,)).fetchone()
     return render_template('teacher/exam_settings.html', exam=exam)
 
+def _exam_locked_response(exam_id):
+    """While an exam is open (status 'active') students may be taking it, so
+    it can't be edited. Returns a ready-made response if the exam is locked,
+    otherwise None. Close the exam first to edit it."""
+    if not exam_id:
+        return None
+    row = get_db().execute('SELECT status, class_id FROM exams WHERE id=?', (exam_id,)).fetchone()
+    if not row or row['status'] != 'active':
+        return None
+    msg = 'This exam is open. Close it first before editing.'
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
+        return jsonify({'ok': False, 'error': msg}), 409
+    flash(msg, 'error')
+    return redirect(url_for('teacher_class_detail', class_id=row['class_id']))
+
 def _wants_json():
     return request.headers.get('X-Requested-With') == 'XMLHttpRequest'
 
@@ -3178,6 +3199,9 @@ def teacher_add_section(exam_id):
         if _wants_json():
             return jsonify({'ok': False, 'error': 'Exam not found.'}), 404
         return redirect(url_for('teacher_home'))
+    locked = _exam_locked_response(exam_id)
+    if locked:
+        return locked
     count = conn.execute('SELECT COUNT(*) FROM sections WHERE exam_id=?', (exam_id,)).fetchone()[0]
     cur = conn.execute('INSERT INTO sections (exam_id, title, description, section_type, order_index) VALUES (?,?,?,?,?)',
                  (exam_id, title, description or None, 'multiple_choice', count))
@@ -3209,6 +3233,9 @@ def teacher_edit_section(section_id):
             return jsonify({'ok': False, 'error': 'Section not found.'}), 404
         return redirect(url_for('teacher_home'))
     exam_id = sec['exam_id']
+    locked = _exam_locked_response(exam_id)
+    if locked:
+        return locked
     title = request.form.get('title', '').strip()
     description = request.form.get('description', '').strip()
     if not title:
@@ -3240,6 +3267,9 @@ def teacher_delete_section(section_id):
     ''', (section_id, session['user_id'])).fetchone()
     if sec:
         exam_id = sec['exam_id']
+        locked = _exam_locked_response(sec['exam_id'])
+        if locked:
+            return locked
         conn.execute('DELETE FROM choices WHERE question_id IN (SELECT id FROM questions WHERE section_id=?)', (section_id,))
         conn.execute('DELETE FROM questions WHERE section_id=?', (section_id,))
         conn.execute('DELETE FROM sections WHERE id=?', (section_id,))
@@ -3262,6 +3292,9 @@ def teacher_import_from_bank(section_id):
             return jsonify({'ok': False, 'error': 'Section not found.'}), 404
         return redirect(url_for('teacher_home'))
     exam_id = sec['exam_id']
+    locked = _exam_locked_response(exam_id)
+    if locked:
+        return locked
     question_ids = request.form.getlist('question_ids')
     imported = 0
     skipped = 0
@@ -3328,6 +3361,9 @@ def teacher_add_question(section_id):
             return jsonify({'ok': False, 'error': 'Section not found.'}), 404
         return redirect(url_for('teacher_home'))
     exam_id = sec['exam_id']
+    locked = _exam_locked_response(exam_id)
+    if locked:
+        return locked
     q_text = request.form.get('question_text', '').strip()
     q_type = request.form.get('question_type', '').strip()
     if q_type not in ('multiple_choice', 'short_answer', 'fill_blank', 'essay', 'true_false'):
@@ -3431,6 +3467,10 @@ def teacher_reorder_questions():
             ''', (section_id, session['user_id'])).fetchone()
             if not sec:
                 continue  # skip sections that don't belong to this teacher
+            locked = _exam_locked_response(sec['exam_id'])
+            if locked:
+                conn.rollback()
+                return locked
             if not isinstance(qids, list):
                 continue
             for idx, qid in enumerate(qids):
@@ -3456,6 +3496,9 @@ def teacher_delete_question(question_id):
     ''', (question_id, session['user_id'], session['user_id'])).fetchone()
     if q:
         exam_id = q['exam_id']
+        locked = _exam_locked_response(q['exam_id'])
+        if locked:
+            return locked
         conn.execute('DELETE FROM choices WHERE question_id=?', (question_id,))
         conn.execute('DELETE FROM questions WHERE id=?', (question_id,))
         conn.commit()
@@ -3480,6 +3523,9 @@ def teacher_edit_question(question_id):
     if not q:
         return redirect(url_for('teacher_home'))
     exam_id = q['exam_id']
+    locked = _exam_locked_response(exam_id)
+    if locked:
+        return locked
     q_text = request.form.get('question_text', '').strip()
     correct = request.form.get('correct_answer', '').strip()
     points = request.form.get('points', 1, type=int)
