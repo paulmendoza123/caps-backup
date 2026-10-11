@@ -1126,13 +1126,10 @@ def handle_password_change(conn, user):
 # ─── System Settings (key/value store, admin-editable) ──────────────────────
 
 SETTINGS_DEFAULTS = {
-    'system_name': 'SPARK Exam System',
-    'school_year': '2025-2026',
-    'semester': '1st',
     'allow_signup': '1',
     'allow_teacher_signup': '1',
     'lockout_max_attempts': '5',
-    'lockout_duration_minutes': '15',
+    'lockout_duration_minutes': '3',
 }
 
 
@@ -1143,9 +1140,6 @@ def get_settings():
     rows = conn.execute('SELECT key, value FROM settings').fetchall()
     raw = {**SETTINGS_DEFAULTS, **{r['key']: r['value'] for r in rows}}
     return {
-        'system_name': raw['system_name'],
-        'school_year': raw['school_year'],
-        'semester': raw['semester'],
         'allow_signup': raw['allow_signup'] == '1',
         'allow_teacher_signup': raw['allow_teacher_signup'] == '1',
         'lockout_max_attempts': int(raw['lockout_max_attempts']),
@@ -1238,6 +1232,14 @@ def login():
                 flash(f'This account is locked due to too many failed login attempts. '
                       f'Try again in {minutes_left} minute(s).', 'error')
                 return render_template('login.html', form=form, settings=page_settings)
+            else:
+                # The lockout has run out: start fresh with a full set of attempts
+                # (otherwise the old failed-attempt count would re-lock the account
+                # on the very next wrong password).
+                conn.execute('UPDATE users SET failed_login_attempts=0, locked_until=NULL WHERE id=?',
+                             (account['id'],))
+                conn.commit()
+                account = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
 
         user = account
         if user and not verify_password(password, user['password']):
@@ -4579,36 +4581,24 @@ def admin_settings():
     conn = get_db()
 
     if request.method == 'POST':
-        section = request.form.get('section', '')
-        if section == 'general':
-            set_settings({
-                'system_name': request.form.get('system_name', '').strip() or SETTINGS_DEFAULTS['system_name'],
-                'school_year': request.form.get('school_year', '').strip() or SETTINGS_DEFAULTS['school_year'],
-                'semester': request.form.get('semester', '').strip() or SETTINGS_DEFAULTS['semester'],
-            })
-            flash('General settings saved.', 'success')
-        elif section == 'security':
-            set_settings({
-                'allow_signup': '1' if request.form.get('allow_signup') == '1' else '0',
-                'allow_teacher_signup': '1' if request.form.get('allow_teacher_signup') == '1' else '0',
-            })
-            flash('Security settings saved.', 'success')
-        elif section == 'lockout':
-            try:
-                max_attempts = int(request.form.get('lockout_max_attempts', 5))
-            except ValueError:
-                max_attempts = 5
-            try:
-                duration = int(request.form.get('lockout_duration_minutes', 15))
-            except ValueError:
-                duration = 15
-            max_attempts = min(max(max_attempts, 3), 20)
-            duration = min(max(duration, 1), 1440)
-            set_settings({
-                'lockout_max_attempts': max_attempts,
-                'lockout_duration_minutes': duration,
-            })
-            flash('Account lockout policy saved.', 'success')
+        # One form saves both the self-registration toggles and the lockout policy.
+        try:
+            max_attempts = int(request.form.get('lockout_max_attempts', 5))
+        except ValueError:
+            max_attempts = 5
+        try:
+            duration = int(request.form.get('lockout_duration_minutes', 3))
+        except ValueError:
+            duration = 3
+        max_attempts = min(max(max_attempts, 3), 20)
+        duration = min(max(duration, 1), 1440)
+        set_settings({
+            'allow_signup': '1' if request.form.get('allow_signup') == '1' else '0',
+            'allow_teacher_signup': '1' if request.form.get('allow_teacher_signup') == '1' else '0',
+            'lockout_max_attempts': max_attempts,
+            'lockout_duration_minutes': duration,
+        })
+        flash('Settings saved.', 'success')
         return redirect(url_for('admin_settings'))
 
     db_size = '—'

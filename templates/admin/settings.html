@@ -11,42 +11,10 @@
 
 <div class="cards-grid">
 
-  <!-- General Settings -->
-  <div class="card">
-    <div class="card-title mb-2">General</div>
-    <form method="POST" action="{{ url_for('admin_settings') }}">
-      <input type="hidden" name="section" value="general" />
-      <div class="form-group">
-        <label class="form-label">System Name</label>
-        <input type="text" name="system_name" class="form-control"
-               value="{{ settings.system_name }}" />
-        <div class="form-hint">Displayed on the login page and browser tab.</div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">School Year</label>
-          <input type="text" name="school_year" class="form-control"
-                 value="{{ settings.school_year }}"
-                 placeholder="e.g. 2025-2026" />
-        </div>
-        <div class="form-group">
-          <label class="form-label">Semester</label>
-          <select name="semester" class="form-select">
-            <option value="1st" {% if settings.semester == '1st' %}selected{% endif %}>1st Semester</option>
-            <option value="2nd" {% if settings.semester == '2nd' %}selected{% endif %}>2nd Semester</option>
-            <option value="summer" {% if settings.semester == 'summer' %}selected{% endif %}>Summer</option>
-          </select>
-        </div>
-      </div>
-      <button type="submit" class="btn btn-primary btn-sm">Save Changes</button>
-    </form>
-  </div>
-
   <!-- Account & Security -->
   <div class="card">
     <div class="card-title mb-2">Account &amp; Security</div>
     <form method="POST" action="{{ url_for('admin_settings') }}">
-      <input type="hidden" name="section" value="security" />
       <div class="form-group">
         <label class="form-label">Allow Student Self-Registration</label>
         <select name="allow_signup" class="form-select" style="max-width:180px">
@@ -63,15 +31,11 @@
         </select>
         <div class="form-hint">If disabled, only admins can create teacher accounts.</div>
       </div>
-      <button type="submit" class="btn btn-primary btn-sm">Save Security</button>
-    </form>
 
-    <div class="divider" style="margin:1.25rem 0"></div>
+      <div class="divider" style="margin:1.25rem 0"></div>
 
-    <div class="card-title mb-1" style="font-size:0.95rem">Account Lockout Policy</div>
-    <div class="text-xs text-muted mb-2">Locks an account out temporarily after too many wrong-password attempts.</div>
-    <form method="POST" action="{{ url_for('admin_settings') }}">
-      <input type="hidden" name="section" value="lockout" />
+      <div class="card-title mb-1" style="font-size:0.95rem">Account Lockout Policy</div>
+      <div class="text-xs text-muted mb-2">Locks an account out temporarily after too many wrong-password attempts.</div>
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Max Failed Attempts</label>
@@ -84,7 +48,7 @@
                  value="{{ settings.lockout_duration_minutes }}" min="1" max="1440" />
         </div>
       </div>
-      <button type="submit" class="btn btn-primary btn-sm">Save Lockout Policy</button>
+      <button type="submit" class="btn btn-primary btn-sm">Save Settings</button>
     </form>
   </div>
 
