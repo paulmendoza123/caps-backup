@@ -54,6 +54,14 @@
   </div>
 </div>
 
+<style>
+  /* Let the Recent Users card stretch to the right edge of the page,
+     in line with the Quick Summary card above it. */
+  @media (min-width: 769px) {
+    .recent-users-card { grid-column: 2 / -1; }
+  }
+</style>
+
 <div class="cards-grid">
 
   <!-- Exam Status -->
@@ -76,7 +84,7 @@
   </div>
 
   <!-- Recent Users -->
-  <div class="card">
+  <div class="card recent-users-card">
     <div class="card-title mb-2">Recent Users</div>
     {% if recent_users %}
       {% for u in recent_users %}
