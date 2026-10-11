@@ -1080,6 +1080,38 @@ def validate_password_strength(password):
                 'uppercase letters, numbers.')
     return None
 
+def handle_profile_update(conn, user, with_year_level=False):
+    """Update the editable parts of a profile (name, and year level for students).
+
+    Returns (ok, profile_errors). Flashes the outcome.
+    """
+    full_name = ' '.join(request.form.get('full_name', '').split())
+    errs = {}
+    if not full_name:
+        errs['full_name'] = True
+    elif len(full_name) > 100:
+        errs['full_name'] = True
+        flash('Name must be 100 characters or fewer.', 'error')
+        return False, errs
+    year_level = None
+    if with_year_level:
+        year_level = request.form.get('year_level', '').strip()
+        if year_level not in ('1st Year', '2nd Year', '3rd Year', '4th Year'):
+            errs['year_level'] = True
+    if errs:
+        if 'Name must' not in ''.join(m for _, m in session.get('_flashes', [])):
+            flash('Please fill in your name' + (' and select a valid year level.' if with_year_level else '.'), 'error')
+        return False, errs
+    if with_year_level:
+        conn.execute('UPDATE users SET full_name=?, year_level=? WHERE id=?',
+                     (full_name, year_level, user['id']))
+    else:
+        conn.execute('UPDATE users SET full_name=? WHERE id=?', (full_name, user['id']))
+    conn.commit()
+    session['full_name'] = full_name
+    flash('Profile updated successfully.', 'success')
+    return True, {}
+
 def handle_password_change(conn, user):
     """Shared "Change Password" form handler for the teacher / student profile
     pages (same rules as the admin profile page).
@@ -1880,11 +1912,19 @@ def student_exam_result(exam_id):
 def student_profile():
     conn = get_db()
     user = conn.execute('SELECT * FROM users WHERE id=?', (session['user_id'],)).fetchone()
-    form, errors = {}, {}
+    form, errors, profile_errors = {}, {}, {}
     if request.method == 'POST':
-        form, errors, ok = handle_password_change(conn, user)
-        if ok:
-            return redirect(url_for('student_profile'))
+        if request.form.get('action') == 'update_profile':
+            ok, profile_errors = handle_profile_update(conn, user, with_year_level=True)
+            if ok:
+                return redirect(url_for('student_profile'))
+            user = dict(user)
+            user['full_name'] = request.form.get('full_name', '')
+            user['year_level'] = request.form.get('year_level', '')
+        else:
+            form, errors, ok = handle_password_change(conn, user)
+            if ok:
+                return redirect(url_for('student_profile'))
     exam_history = conn.execute('''
         SELECT es.*, e.title as exam_title, e.status as exam_status,
                c.subject_name, c.block_name, e.passing_score,
@@ -1897,22 +1937,8 @@ def student_profile():
         WHERE es.student_id = ?
         ORDER BY es.started_at DESC
     ''', (session['user_id'],)).fetchall()
-    # Current enrolled classes
-    enrolled_classes = conn.execute('''
-        SELECT c.*, u.full_name as teacher_name,
-               COUNT(DISTINCT ce2.student_id) as classmate_count,
-               COUNT(DISTINCT e.id) as exam_count
-        FROM class_enrollments ce
-        JOIN classes c ON ce.class_id = c.id
-        JOIN users u ON c.teacher_id = u.id
-        LEFT JOIN class_enrollments ce2 ON c.id = ce2.class_id
-        LEFT JOIN exams e ON c.id = e.class_id
-        WHERE ce.student_id = ?
-        GROUP BY c.id
-        ORDER BY c.is_active DESC, c.created_at DESC
-    ''', (session['user_id'],)).fetchall()
-    return render_template('student/profile.html', user=user, exam_history=exam_history, enrolled_classes=enrolled_classes,
-                           form=form, errors=errors)
+    return render_template('student/profile.html', user=user, exam_history=exam_history,
+                           form=form, errors=errors, profile_errors=profile_errors)
 
 # ─── Teacher Routes ───────────────────────────────────────────────────────────
 
@@ -4305,11 +4331,18 @@ def teacher_question_bank():
 def teacher_profile():
     conn = get_db()
     user = conn.execute('SELECT * FROM users WHERE id=?', (session['user_id'],)).fetchone()
-    form, errors = {}, {}
+    form, errors, profile_errors = {}, {}, {}
     if request.method == 'POST':
-        form, errors, ok = handle_password_change(conn, user)
-        if ok:
-            return redirect(url_for('teacher_profile'))
+        if request.form.get('action') == 'update_profile':
+            ok, profile_errors = handle_profile_update(conn, user)
+            if ok:
+                return redirect(url_for('teacher_profile'))
+            user = dict(user)
+            user['full_name'] = request.form.get('full_name', '')
+        else:
+            form, errors, ok = handle_password_change(conn, user)
+            if ok:
+                return redirect(url_for('teacher_profile'))
     exam_history = conn.execute('''
         SELECT e.*, c.subject_name, c.block_name,
                COUNT(DISTINCT es.id) as total_takers,
@@ -4354,7 +4387,7 @@ def teacher_profile():
             'correct': row['correct_count'] or 0,
         })
     return render_template('teacher/profile.html', user=user, exam_history=exam_history, exam_questions=exam_questions,
-                           form=form, errors=errors)
+                           form=form, errors=errors, profile_errors=profile_errors)
 
 # ─── Admin Routes ─────────────────────────────────────────────────────────────
 
