@@ -5441,29 +5441,35 @@ def api_save_answer():
         return jsonify({'status': 'saved'})
     return jsonify({'status': 'error', 'reason': 'session not found or not ongoing'})
 
-if __name__ == '__main__':
-    os.makedirs(os.path.join(os.path.dirname(__file__), 'instance'), exist_ok=True)
-    with app.app_context():
-        init_db()
+# ─── App startup: DB init + background maintenance thread ───────────────────
+# This runs on *import*, not just when the script is executed directly, so it
+# fires whether the app is started as `python app.py` (local/Windows testing,
+# via waitress/Flask's dev server below) OR loaded by a production WSGI server
+# like gunicorn on the Raspberry Pi (`gunicorn app:app`), which imports this
+# module as `app:app` and never hits the `__name__ == '__main__'` block.
+os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance'), exist_ok=True)
+with app.app_context():
+    init_db()
 
-    # Scheduling/auto-close checks now run on their own timer instead of on
-    # every request (see background_maintenance_loop / removed before_request hook).
+# Scheduling/auto-close checks run on their own timer instead of on every
+# request (see background_maintenance_loop / removed before_request hook).
+# Guarded against the Werkzeug reloader (which re-imports this module in its
+# child process) so only one maintenance thread ever runs per process.
+if not os.environ.get('WERKZEUG_RUN_MAIN') or __name__ == '__main__':
     maintenance_thread = threading.Thread(target=background_maintenance_loop, daemon=True)
     maintenance_thread.start()
 
-    # This app is meant to run on a local classroom network (e.g. a Raspberry Pi
-    # acting as the exam server) with dozens of students connecting at once.
-    # Flask's built-in dev server handles one request at a time by default,
-    # which becomes a serious bottleneck under real exam traffic (each student
-    # polls status/heartbeat every few seconds). Waitress is a lightweight,
-    # pure-Python, multi-threaded production server that handles this properly
-    # and needs no extra system packages, so it works cleanly on a Pi.
+if __name__ == '__main__':
+    # Local/manual run: `python app.py`. Used for Windows dev/testing, and as
+    # a quick fallback on the Pi if gunicorn isn't set up yet. NOT what the
+    # Raspberry Pi should run for real exams — see README for the gunicorn
+    # (+ optional nginx) production setup, which handles concurrent students
+    # far better than either of these.
     try:
         from waitress import serve
-        print("Starting production server (waitress) on http://0.0.0.0:5000 ...")
+        print("Starting local server (waitress) on http://0.0.0.0:5000 ...")
         serve(app, host='0.0.0.0', port=5000, threads=16)
     except ImportError:
         print("WARNING: 'waitress' is not installed (pip install waitress).")
         print("Falling back to Flask's built-in server with threading enabled.")
-        print("For real exam use with many students, install waitress instead.")
         app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

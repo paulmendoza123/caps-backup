@@ -1,0 +1,53 @@
+# systemd service for SPARK, run by gunicorn on the Raspberry Pi.
+#
+# HOW TO USE:
+#   1. Edit the three paths below (User, WorkingDirectory, ExecStart) to match
+#      where you actually cloned the repo and set up your virtualenv on the Pi.
+#      Replace every "pi" / "/home/pi/capss" with your real username/path if different.
+#   2. Copy this file onto the Pi:
+#        sudo cp deploy/spark.service /etc/systemd/system/spark.service
+#   3. Reload systemd and start it:
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable spark      # auto-start on boot
+#        sudo systemctl start spark
+#   4. Check it's running / see logs:
+#        sudo systemctl status spark
+#        sudo journalctl -u spark -f
+#
+# This binds gunicorn to 127.0.0.1:5000 only (not 0.0.0.0) because nginx is
+# meant to sit in front of it and be the thing actually exposed on the
+# network — see deploy/nginx_spark.conf. If you are NOT using nginx and want
+# to reach Flask directly from other devices on the network, change the
+# --bind value below to 0.0.0.0:5000 instead.
+#
+# NOTE on --workers: kept at 1 on purpose, with multiple --threads instead.
+# SPARK uses SQLite (fine for one classroom network, but not built for many
+# separate processes hammering it at once) and runs its own background
+# maintenance thread on startup (auto-activating/closing scheduled exams) —
+# with workers > 1, gunicorn would spawn that thread once per worker process,
+# which is wasteful and can race. One process with several threads (same
+# shape as the waitress server this replaces) avoids both problems while
+# still handling many concurrent students.
+
+[Unit]
+Description=SPARK Exam System (gunicorn)
+After=network.target
+
+[Service]
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/capss
+# If you used a virtualenv (recommended), point this at its gunicorn:
+#   /home/pi/capss/venv/bin/gunicorn
+ExecStart=/home/pi/capss/venv/bin/gunicorn \
+    --worker-class gthread \
+    --workers 1 \
+    --threads 8 \
+    --bind 127.0.0.1:5000 \
+    --timeout 120 \
+    app:app
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -66,6 +66,57 @@ python app.py
 
 Open: **http://localhost:5000**
 
+This local run uses waitress (or Flask's dev server as a fallback) — fine for
+development and for Windows machines, where gunicorn below doesn't run.
+
+---
+
+## 🖥️ Production Deployment on the Raspberry Pi
+
+For real exam day, run SPARK behind **gunicorn** (production WSGI server) with
+**nginx** in front of it as a reverse proxy, instead of `python app.py`. This
+is Linux-only, so it's meant for the Pi, not for Windows dev machines.
+
+```bash
+# 1. On the Pi, inside the project folder:
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 2. Quick manual test — confirm gunicorn itself runs the app correctly
+#    before wiring it into systemd:
+gunicorn --worker-class gthread --workers 1 --threads 8 --bind 0.0.0.0:5000 app:app
+# Visit http://<pi-ip>:5000 from another device on the network, then Ctrl+C.
+
+# 3. Install it as a systemd service so it auto-starts and restarts on crash:
+#    (edit deploy/spark.service first — paths/username must match your Pi)
+sudo cp deploy/spark.service /etc/systemd/system/spark.service
+sudo systemctl daemon-reload
+sudo systemctl enable spark
+sudo systemctl start spark
+sudo systemctl status spark          # should say "active (running)"
+
+# 4. (Optional but recommended) put nginx in front of it on port 80, so
+#    students just hit the Pi's IP with no ":5000":
+sudo apt install nginx -y            # skip if already installed
+#    (edit deploy/nginx_spark.conf first — static files path must match your Pi)
+sudo cp deploy/nginx_spark.conf /etc/nginx/sites-available/spark
+sudo ln -s /etc/nginx/sites-available/spark /etc/nginx/sites-enabled/spark
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+See `deploy/spark.service` and `deploy/nginx_spark.conf` for the full,
+commented config files (why single-worker-multi-thread, why `/static/` is
+served by nginx directly, etc.).
+
+**After pulling new code**, restart the service so the change takes effect:
+```bash
+git pull
+sudo systemctl restart spark
+```
+
 ---
 
 ## 🔑 First-Run Admin Account
